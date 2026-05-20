@@ -21,6 +21,7 @@ load_dotenv(ROOT_DIR / '.env')
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 from integrations import square_client as sq
 from integrations.notifications import send_email, send_slack
+from integrations.square_errors import sanitize_square_error
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -643,188 +644,6 @@ async def update_deal(deal_id: str, payload: DealUpdate, user: User = Depends(ge
     return Deal(**doc)
 
 
-# ---------- Square Payments ----------
-PACKAGES = sq.PACKAGES
-
-
-class CheckoutCreate(BaseModel):
-    package_id: str
-    origin_url: str
-
-
-@api_router.post("/payments/checkout/session")
-async def create_checkout(payload: CheckoutCreate, user: User = Depends(get_current_user)):
-    if payload.package_id not in PACKAGES:
-        raise HTTPException(400, "Invalid package")
-    if not os.environ.get("SQUARE_ACCESS_TOKEN"):
-        raise HTTPException(500, "Square not configured")
-
-    origin = payload.origin_url.rstrip("/")
-    redirect_url = f"{origin}/app/checkout-return"
-
-    try:
-        link = await sq.create_payment_link(
-            package_id=payload.package_id,
-            redirect_url=redirect_url,
-            user_id=user.user_id,
-            email=user.email,
-        )
-    except Exception as e:
-        logging.error(f"Square link create failed: {e}")
-        raise HTTPException(502, f"Square error: {str(e)[:160]}")
-
-    await db.payment_transactions.insert_one({
-        "session_id": link["id"],          # Square payment_link id
-        "order_id": link.get("order_id"),
-        "user_id": user.user_id,
-        "email": user.email,
-        "package_id": payload.package_id,
-        "amount": PACKAGES[payload.package_id]["amount"],
-        "currency": "usd",
-        "payment_status": "initiated",
-        "status": "open",
-        "provider": "square",
-        "metadata": {"package_id": payload.package_id, "user_id": user.user_id},
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-    })
-
-    return {"url": link["url"], "session_id": link["id"]}
-
-
-@api_router.get("/payments/checkout/status/{session_id}")
-async def checkout_status(session_id: str, user: User = Depends(get_current_user)):
-    txn = await db.payment_transactions.find_one({"session_id": session_id, "user_id": user.user_id}, {"_id": 0})
-    if not txn:
-        raise HTTPException(404, "Transaction not found")
-
-    # Try to query Square for order status if we have an order_id
-    order_id = txn.get("order_id")
-    detected_paid = False
-    try:
-        if order_id:
-            order = await sq.get_order(order_id)
-            state = (order.get("state") or "").upper()
-            if state == "COMPLETED":
-                detected_paid = True
-    except Exception as e:
-        logging.warning(f"Square order lookup failed for {order_id}: {e}")
-
-    new_payment_status = "paid" if detected_paid else txn.get("payment_status", "initiated")
-    if detected_paid and txn["payment_status"] != "paid":
-        await db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": "paid", "status": "complete", "updated_at": now_iso()}},
-        )
-        await db.users.update_one(
-            {"user_id": user.user_id},
-            {"$set": {
-                "subscription_package": txn.get("package_id"),
-                "subscription_active": True,
-                "subscribed_at": now_iso(),
-                "renews_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
-            }},
-        )
-        act = Activity(
-            user_id=user.user_id,
-            agent="Pipeline-Analyst",
-            action="Subscription activated",
-            target=PACKAGES.get(txn.get("package_id"), {}).get("name", "Plan"),
-            outcome=f"${txn.get('amount', 0):,.0f}/mo",
-            status="closing",
-        )
-        await db.activities.insert_one(dict(act.model_dump()))
-        await send_slack(
-            db,
-            text=f":rocket: *{user.email}* activated *{PACKAGES.get(txn.get('package_id'), {}).get('name', 'Plan')}* plan (${txn.get('amount', 0):,.0f}/mo)",
-            user_id=user.user_id,
-            kind="subscription.activated",
-        )
-
-    return {
-        "session_id": session_id,
-        "status": "complete" if detected_paid else txn.get("status", "open"),
-        "payment_status": new_payment_status,
-        "amount_total": int(txn.get("amount", 0) * 100),
-        "currency": txn.get("currency", "usd"),
-        "package_id": txn.get("package_id"),
-        "provider": "square",
-    }
-
-
-@api_router.post("/webhook/square")
-async def square_webhook(request: Request):
-    raw = await request.body()
-    sig = request.headers.get("x-square-hmacsha256-signature", "")
-    if not sq.validate_webhook(raw, sig):
-        logging.warning("Square webhook signature mismatch")
-        return Response(status_code=400)
-
-    try:
-        evt = json.loads(raw.decode("utf-8"))
-    except Exception:
-        return Response(status_code=400)
-
-    event_type = evt.get("type", "")
-    data = evt.get("data", {}).get("object", {}) or {}
-    logging.info(f"Square webhook: {event_type}")
-
-    # Payment events: mark transaction paid
-    if event_type.startswith("payment."):
-        payment = data.get("payment") or {}
-        order_id = payment.get("order_id")
-        status = (payment.get("status") or "").upper()
-        if order_id and status == "COMPLETED":
-            await db.payment_transactions.update_one(
-                {"order_id": order_id},
-                {"$set": {"payment_status": "paid", "status": "complete", "updated_at": now_iso()}},
-            )
-            txn = await db.payment_transactions.find_one({"order_id": order_id}, {"_id": 0})
-            if txn:
-                await db.users.update_one(
-                    {"user_id": txn["user_id"]},
-                    {"$set": {
-                        "subscription_package": txn.get("package_id"),
-                        "subscription_active": True,
-                        "subscribed_at": now_iso(),
-                        "renews_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
-                    }},
-                )
-    return {"ok": True}
-
-
-@api_router.get("/payments/packages")
-async def list_packages():
-    return {"packages": [{"id": k, **v} for k, v in PACKAGES.items()]}
-
-
-@api_router.get("/payments/subscription")
-async def get_subscription(user: User = Depends(get_current_user)):
-    """Return current subscription state for the authenticated user."""
-    u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
-    return {
-        "active": bool(u.get("subscription_active")),
-        "package_id": u.get("subscription_package"),
-        "package": PACKAGES.get(u.get("subscription_package") or "", None),
-        "subscribed_at": u.get("subscribed_at"),
-        "renews_at": u.get("renews_at"),
-    }
-
-
-@api_router.post("/payments/subscription/cancel_legacy")
-async def cancel_subscription_legacy(user: User = Depends(get_current_user)):
-    """Deprecated — kept for backward compat. New endpoint also at /payments/subscription/cancel uses Square Subscriptions API."""
-    u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
-    if not u or not u.get("subscription_active"):
-        raise HTTPException(404, "No active subscription")
-    pkg_id = u.get("subscription_package")
-    await db.users.update_one(
-        {"user_id": user.user_id},
-        {"$set": {"subscription_active": False, "canceled_at": now_iso()}},
-    )
-    return {"ok": True, "canceled_package": pkg_id}
-
-
 # ---------- Outbox (for inspecting MOCKED notifications) ----------
 @api_router.get("/notifications/outbox")
 async def get_outbox(user: User = Depends(get_current_user), limit: int = 50):
@@ -982,15 +801,19 @@ Generate the buyer reply + Nexus AI's drafted follow-up in strict JSON."""
         intent=reply.intent,
     )
 
-    # Auto-send guard: user settings + Claude confidence + positive sentiment + meaningful delta
+    # Auto-send guard: user settings + Claude confidence + positive sentiment + meaningful delta + deal-size cap
     user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0}) or {}
     auto_send_enabled = bool(user_doc.get("auto_send_enabled", False))
     threshold = int(user_doc.get("auto_send_threshold", 85))
+    value_cap = int(user_doc.get("auto_send_deal_value_cap", 50000))
+    deal_value = float((deal_doc or {}).get("value") or 0)
+    deal_under_cap = (deal_value <= value_cap) if deal_doc else True
     will_auto_send = (
         auto_send_enabled
         and draft_obj.confidence >= threshold
         and draft_obj.sentiment == "positive"
         and draft_obj.probability_delta >= 15
+        and deal_under_cap
     )
     if will_auto_send:
         draft_obj.status = "auto_sent"
@@ -1141,117 +964,6 @@ async def reply_stats(user: User = Depends(get_current_user)):
     return {"pending": pending, "sent": sent, "received": received, "auto_sent": auto_sent}
 
 
-# ---------- Square Recurring Subscriptions (real, via Web Payments SDK) ----------
-@api_router.get("/payments/config")
-async def payments_config():
-    """Public — frontend needs these to mount Square Web Payments SDK."""
-    return {
-        "application_id": os.environ.get("SQUARE_APPLICATION_ID"),
-        "location_id": os.environ.get("SQUARE_LOCATION_ID"),
-        "environment": os.environ.get("SQUARE_ENVIRONMENT", "sandbox"),
-    }
-
-
-class SubscribePayload(BaseModel):
-    package_id: str
-    source_id: str  # Square Web Payments SDK card-nonce
-    cardholder_name: Optional[str] = None
-
-
-@api_router.post("/payments/subscribe")
-async def create_recurring_subscription(payload: SubscribePayload, user: User = Depends(get_current_user)):
-    if payload.package_id not in sq.PACKAGES:
-        raise HTTPException(400, "Invalid package")
-
-    try:
-        customer_id = await sq.upsert_customer(email=user.email, name=user.name or user.email, user_id=user.user_id)
-        card_id = await sq.create_card_on_file(customer_id=customer_id, source_id=payload.source_id, cardholder=payload.cardholder_name or user.name or user.email)
-        sub = await sq.create_subscription(package_id=payload.package_id, customer_id=customer_id, card_id=card_id)
-    except Exception as e:
-        logging.error(f"Square subscription error: {e}")
-        raise HTTPException(502, f"Square error: {str(e)[:200]}")
-
-    await db.payment_transactions.insert_one({
-        "session_id": sub["id"],
-        "subscription_id": sub["id"],
-        "user_id": user.user_id,
-        "email": user.email,
-        "package_id": payload.package_id,
-        "amount": sq.PACKAGES[payload.package_id]["amount"],
-        "currency": "usd",
-        "payment_status": "paid",
-        "status": "complete",
-        "provider": "square_subscription",
-        "square_customer_id": customer_id,
-        "square_card_id": card_id,
-        "metadata": {"package_id": payload.package_id, "user_id": user.user_id},
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-    })
-    await db.users.update_one(
-        {"user_id": user.user_id},
-        {"$set": {
-            "subscription_package": payload.package_id,
-            "subscription_active": True,
-            "subscription_id": sub["id"],
-            "square_customer_id": customer_id,
-            "square_card_id": card_id,
-            "subscribed_at": now_iso(),
-            "renews_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
-        }},
-    )
-    act = Activity(
-        user_id=user.user_id,
-        agent="Pipeline-Analyst",
-        action="Recurring subscription activated",
-        target=sq.PACKAGES[payload.package_id]["name"],
-        outcome=f"${sq.PACKAGES[payload.package_id]['amount']:,.0f}/mo · Square sub {sub['id']}",
-        status="closing",
-    )
-    await db.activities.insert_one(dict(act.model_dump()))
-    await send_slack(
-        db,
-        text=f":rocket: *{user.email}* started recurring *{sq.PACKAGES[payload.package_id]['name']}* (${sq.PACKAGES[payload.package_id]['amount']:,.0f}/mo)",
-        user_id=user.user_id,
-        kind="subscription.recurring.activated",
-    )
-
-    return {"ok": True, "subscription_id": sub["id"], "status": sub.get("status")}
-
-
-@api_router.post("/payments/subscription/cancel")
-async def cancel_recurring_subscription(user: User = Depends(get_current_user)):
-    u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0}) or {}
-    if not u.get("subscription_active"):
-        raise HTTPException(404, "No active subscription")
-    sub_id = u.get("subscription_id")
-    canceled_remote = None
-    if sub_id:
-        try:
-            canceled_remote = await sq.cancel_subscription(sub_id)
-        except Exception as e:
-            logging.warning(f"Square cancel failed (will still mark locally): {e}")
-    pkg_id = u.get("subscription_package")
-    await db.users.update_one(
-        {"user_id": user.user_id},
-        {"$set": {"subscription_active": False, "canceled_at": now_iso()}},
-    )
-    act = Activity(
-        user_id=user.user_id,
-        agent="Pipeline-Analyst",
-        action="Subscription canceled",
-        target=sq.PACKAGES.get(pkg_id or "", {}).get("name", "Plan"),
-        status="idle",
-    )
-    await db.activities.insert_one(dict(act.model_dump()))
-    await send_slack(
-        db,
-        text=f":wave: *{user.email}* canceled *{sq.PACKAGES.get(pkg_id or '', {}).get('name', 'Plan')}* plan",
-        user_id=user.user_id,
-        kind="subscription.canceled",
-    )
-    return {"ok": True, "canceled_package": pkg_id, "square_status": (canceled_remote or {}).get("status")}
-
 
 # ============== SEED DATA ==============
 SAMPLE_SIGNALS = [
@@ -1303,7 +1015,9 @@ app.include_router(api_router)
 
 # Modular routers (extracted from server.py for maintainability)
 from routers.settings import router as settings_router
+from routers.payments import router as payments_router
 app.include_router(settings_router)
+app.include_router(payments_router)
 
 app.add_middleware(
     CORSMiddleware,

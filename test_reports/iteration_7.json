@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 7 / Nexus AI v6 — validated three focused changes: (1) Settings now exposes auto_send_deal_value_cap (default 50000, clamped 0..10_000_000), (2) Square error sanitization wraps raw SDK errors as user-friendly strings, (3) Router split (routers/settings.py + routers/payments.py) — all previously-passing endpoints still respond identically. Wrote /app/backend/tests/test_nexus_v6.py (16 tests, ALL PASSED in 22.7s). Frontend Playwright on /app/settings: dealcap-row + dealcap-slider mount, formatted display ($50K → $100K after drag), PUT /api/settings returns 200, value persists round-trip via subsequent GET. Per-deal autonomy cap test: with auto_send_enabled=true, threshold=50, cap=$10 — simulate-reply on a fresh promote.intro returns auto_sent:false and draft.status='pending' (verified live against demo session). Square sanitization confirmed: POST /api/payments/subscribe with cnon:bad-token returns 502 detail='Card details are invalid.' — no traceback / no Square SDK class names leaked. Router-split regression: /api/payments/{packages,config,checkout/session,checkout/status/{id},subscribe,subscription,subscription/cancel} + /api/webhook/square all return expected status codes. Regression sweep of /app/dashboard,/pipeline,/replies,/outbox,/billing — 0 console errors across all 5 routes.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_nexus_v6.py",
+    "/app/test_reports/pytest/pytest_v6.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "GOOD: routers/settings.py is a clean 38-line APIRouter with prefix='/api/settings', tags=['settings']. GET & PUT both depend on get_current_user — no auth bypass. PUT clamps threshold to [50,100] AND cap to [0, 10_000_000]; idempotent.",
+    "GOOD: routers/payments.py — single APIRouter(prefix='/api', tags=['payments']) cleanly hosts all 7 endpoints + /webhook/square. All exception sites call sanitize_square_error() rather than str(e) — verified at line 54 (checkout link) and line 130 (subscribe).",
+    "GOOD: integrations/square_errors.py — SAFE_MESSAGES dict covers 12 Square error codes mapped to user-facing strings; falls back to generic 'Payment processing failed. Please try again.' Never leaks raw exc text.",
+    "GOOD: server.py auto-send guard (line 811-817) correctly composes 5 conditions: auto_send_enabled AND confidence>=threshold AND sentiment=='positive' AND probability_delta>=15 AND deal_under_cap. Cap evaluated as deal_value <= value_cap (line 810) — correct inequality, and gracefully treats missing deal_doc as deal_under_cap=True (no false-block when deal context absent).",
+    "GOOD: server.py shrank 1341 → 1031 lines (310 lines extracted). Imports at bottom (line 1019-1020) — correct because deps.py is module-level. No circular import risk.",
+    "GOOD: Frontend /app/settings — dealcap slider is disabled when auto_send_enabled is off (opacity 0.4) — clear visual affordance. Formatter handles $0/$5K/$100K/$1M correctly (verified $100K rendering).",
+    "MINOR: routers/payments.py uses prefix='/api' (not '/api/payments') because /webhook/square needs to be a sibling. Consider two routers (one for /api/payments/* with prefix='/api/payments', one for /api/webhook/* with prefix='/api/webhook') to reduce path coupling. Non-blocking.",
+    "MINOR: square_errors.py line 28 has operator precedence ambiguity: `'PLAN_VARIATION' in upper or 'PLAN' in upper and 'NOT' in upper` — Python parses as `A or (B and C)`. Works as intended but worth wrapping in parens for clarity: `('PLAN_VARIATION' in upper) or ('PLAN' in upper and 'NOT' in upper)`.",
+    "MINOR: routers/settings.py UserSettings has no field validators — Pydantic will coerce strings/floats to ints silently. Acceptable since server-side clamp is the real guard."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_nexus_v6.py (new — 16 tests, all PASS)"
+  ],
+  "success_rate": {
+    "backend": "100% (16/16 passed — Settings 3/3, PerDealAutonomy 2/2, SquareErrorSanitization 2/2, RouterSplitRegression 9/9)",
+    "frontend": "100% — Settings dealcap-row + dealcap-slider render, $100K format verified, PUT /api/settings → 200, GET round-trip confirms persistence. All 5 regression routes load with 0 console errors."
+  },
+  "test_credentials": "Demo session: demo_session_token_persistent (Bearer header OR cookie). See /app/memory/test_credentials.md.",
+  "seed_data_creation": "test_low_cap_blocks_auto_send consumed 1 fresh promote.intro email (created 1 reply_draft + 1 reply doc). test_raised_cap_enables_auto_send_path may have consumed another. Frontend test mutated demo user settings then reset to defaults (enabled=false, threshold=85, cap=50000).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_nexus_v6.py is the canonical regression for v6 (Settings cap + Square sanitization + router split). The per-deal autonomy tests both find a fresh promote.intro by querying /api/notifications/outbox and filtering against /api/replies/queue email_ids. If demo user runs out of fresh emails (after multiple runs), the tests will fall back to ANY promote.intro and may either pass (if simulate is idempotent) or skip — neither is a feature regression. Sanitization test asserts the detail string contains one of 14 known SAFE_PHRASES and contains NO raw markers ('traceback', '<class ', 'squareup', 'api_error', etc) — robust to Square message text changes. Frontend testids verified: settings-page, autosend-toggle, threshold-slider, dealcap-row, dealcap-slider, save-settings-btn, settings-saved.",
+  "rca of the issue": "No bugs found. All three v6 changes work as specified: cap is enforced server-side in the auto-send guard, Square errors are sanitized via the SAFE_MESSAGES map, and the router split preserves identical behavior (verified by 9 regression endpoints all returning expected status codes)."
+}

@@ -4,7 +4,7 @@ import AgentStatus from "../components/AgentStatus";
 import { Sliders, Save, Loader2, Sparkles, Info } from "lucide-react";
 
 export default function Settings() {
-  const [settings, setSettings] = useState({ auto_send_enabled: false, auto_send_threshold: 85 });
+  const [settings, setSettings] = useState({ auto_send_enabled: false, auto_send_threshold: 85, auto_send_deal_value_cap: 50000 });
   const [stats, setStats] = useState({ pending: 0, sent: 0, received: 0, auto_sent: 0 });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -12,7 +12,11 @@ export default function Settings() {
   useEffect(() => {
     (async () => {
       const [s, st] = await Promise.all([api.get("/settings"), api.get("/replies/stats")]);
-      setSettings(s.data);
+      setSettings({
+        auto_send_enabled: !!s.data.auto_send_enabled,
+        auto_send_threshold: s.data.auto_send_threshold || 85,
+        auto_send_deal_value_cap: s.data.auto_send_deal_value_cap ?? 50000,
+      });
       setStats(st.data);
     })();
   }, []);
@@ -31,6 +35,13 @@ export default function Settings() {
   };
 
   const setThreshold = (v) => setSettings((s) => ({ ...s, auto_send_threshold: Math.max(50, Math.min(100, parseInt(v) || 50)) }));
+  const setCap = (v) => setSettings((s) => ({ ...s, auto_send_deal_value_cap: Math.max(0, parseInt(v) || 0) }));
+
+  const fmtCap = (n) => {
+    if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1000) return `$${Math.round(n / 1000)}K`;
+    return `$${n}`;
+  };
 
   return (
     <div className="p-6 lg:p-10" data-testid="settings-page">
@@ -110,6 +121,34 @@ export default function Settings() {
             <Info size={12} />
             At threshold = <span className="text-zinc-300">85%</span> with auto-send <span className="text-zinc-300">on</span>, roughly 1-in-4 buyer replies clear the bar.
             You'll still review the rest manually.
+          </div>
+
+          {/* Deal-value cap */}
+          <div className="py-6 mt-4 border-t" style={{ borderColor: "var(--nx-border)" }} data-testid="dealcap-row">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-sm text-zinc-200">Auto-send deal-value cap</div>
+                <div className="text-xs text-zinc-500 mt-1">Above this size, drafts always require human approval.</div>
+              </div>
+              <div className="font-mono text-2xl" style={{ color: "var(--nx-cyan)" }}>{fmtCap(settings.auto_send_deal_value_cap)}</div>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={500000}
+              step={5000}
+              value={settings.auto_send_deal_value_cap}
+              onChange={(e) => setCap(e.target.value)}
+              disabled={!settings.auto_send_enabled}
+              className="w-full nx-slider"
+              data-testid="dealcap-slider"
+              style={{ accentColor: "var(--nx-cyan)", opacity: settings.auto_send_enabled ? 1 : 0.4 }}
+            />
+            <div className="flex justify-between text-[10px] text-zinc-600 mt-2">
+              <span>$0 (everything manual)</span>
+              <span>$50K (recommended)</span>
+              <span>$500K+ (very autonomous)</span>
+            </div>
           </div>
 
           <div className="mt-8 flex items-center gap-3">
