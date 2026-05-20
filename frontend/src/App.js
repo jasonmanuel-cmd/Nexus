@@ -10,6 +10,7 @@ import Login from "@/pages/Login";
 import AuthCallback from "@/pages/AuthCallback";
 import Subscribe from "@/pages/Subscribe";
 import CheckoutReturn from "@/pages/CheckoutReturn";
+import Outbox from "@/pages/Outbox";
 import AppShell from "@/components/AppShell";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { AuthProvider } from "@/lib/AuthContext";
@@ -36,6 +37,7 @@ function HashAuthRouter() {
       <Route path="/app/lead-engine"    element={<Shell><LeadEngine /></Shell>} />
       <Route path="/app/pipeline"       element={<Shell><Pipeline /></Shell>} />
       <Route path="/app/onboarding"     element={<Shell><Onboarding /></Shell>} />
+      <Route path="/app/outbox"         element={<Shell><Outbox /></Shell>} />
       <Route path="/app/subscribe"      element={<Shell><Subscribe /></Shell>} />
       <Route path="/app/checkout-return" element={<Shell><CheckoutReturn /></Shell>} />
       <Route path="*" element={<Navigate to="/" replace />} />

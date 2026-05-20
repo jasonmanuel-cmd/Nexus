@@ -1,0 +1,47 @@
+{
+  "summary": "Iteration 4 — Nexus AI v3 testing of Stripe→Square swap, MOCKED Resend+Slack notifications, FastAPI lifespan handler, and new /app/outbox page. ALL 15 v3 backend tests pass + ALL 14 v2 regression tests pass (29/29 total). Frontend Subscribe + Outbox + nav-outbox + dashboard regression all pass. Lifespan handler verified clean — backend logs show 'Nexus AI starting up' / 'shut down' with NO @on_event deprecation warnings.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/app/dashboard initial mount", "issues": ["Recharts emits 'width(-1) and height(-1) of chart should be greater than 0' warning during initial layout (carry-over from iteration_3) — non-breaking, 2 ResponsiveContainers still render. Optional: set explicit min-height on chart wrapper."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_nexus_v3.py",
+    "/app/backend/tests/test_nexus_v2.py",
+    "/app/test_reports/pytest/pytest_v3.xml"
+  ],
+  "action_items": [
+    "None blocking. v3 features (Square swap + MOCKED notifications + Outbox + lifespan) all verified working end-to-end.",
+    "Optional carry-over from iteration_3: tidy Recharts ResponsiveContainer min-height warning on /app/dashboard."
+  ],
+  "critical_code_review_comments": [
+    "GOOD: lifespan handler at server.py L32-37 correctly replaces deprecated @app.on_event — backend logs confirm clean startup/shutdown.",
+    "GOOD: integrations/notifications.py persists to email_outbox/slack_outbox with mocked=true + provider='resend_mock'/'slack_mock' when env vars unset — matches spec exactly.",
+    "GOOD: integrations/square_client.py wraps sync Square SDK with asyncio.to_thread (non-blocking). Webhook HMAC validation uses hmac.compare_digest (timing-safe).",
+    "GOOD: update_deal (server.py L613-643) only fires Slack/email when payload.stage AND payload.stage != existing.stage — verified by test_patch_without_stage_change_no_notifications.",
+    "GOOD: /api/notifications/outbox is per-user scoped via {user_id: user.user_id} filter and excludes _id — verified by test_outbox_scoped_per_user.",
+    "MINOR: server.py is now 908 lines (was 793 in iter_3) — continued growth. Recommend splitting into routers (auth/payments/dashboard/leads/pipeline/onboarding/targets/notifications) per code-review guideline (>700 line file).",
+    "MINOR: payment_transactions.payment_status still uses 'initiated' instead of Square/Stripe-canonical 'unpaid' — non-blocking but inconsistent vocabulary.",
+    "MINOR: square_client._get_order_sync line 85 builds tender dicts via t.__dict__ fallback which may include private attrs — consider using .model_dump() if Square SDK exposes it.",
+    "MINOR: send_email/send_slack in notifications.py have TODO stubs for live Resend/Slack POST — clearly marked MOCKED, fine for current spec. When flipped live, wrap http.post in try/except to avoid blocking the request on third-party failure."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_nexus_v3.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (15/15 v3 + 14/14 v2 regression = 29/29)",
+    "frontend": "100% (Subscribe page loads, both subscribe-btn-{operator,scale} present, active-subscription-panel correctly hidden when inactive, POST /checkout/session returns HTTP 200 with square.link URL; Outbox page loads with outbox-page testid, nav-outbox sidebar link works, outbox-stat-email=5 / outbox-stat-slack=8 match list counts, both tabs switch correctly, MOCKED badge visible on every item; Dashboard regression: 2 recharts render)"
+  },
+  "test_credentials": "Demo session token: demo_session_token_persistent (Bearer header or cookie). user_id=demo-user-001, email=demo@nexus.ai. See /app/memory/test_credentials.md.",
+  "seed_data_creation": "Created 2 fresh TEST_V3_* profiles + 20 LLM-generated targets during TestNotifications setup (promoted 1, generated 5 email_outbox + 8 slack_outbox messages total in demo user's outbox). Briefly toggled demo user's subscription_active true→false during cancel test (now false). 2 transient Square payment_links created and cleaned up. 1 TEST_StageChg_* deal cleaned up. Demo user's outbox now has visible promote.intro emails + target.promoted/deal.stage.qualified/deal.stage.closed_won slack messages for the next agent to verify the Outbox UI without re-seeding.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend tests are idempotent: test_nexus_v3.py + test_nexus_v2.py can be rerun safely (each creates+cleans its own TEST_-prefixed records, and cancel test always resets subscription_active=false). Demo user outbox is seeded with at least 5 emails + 8 slack messages for instant Outbox UI verification. Square sandbox payment links generated during tests are NOT cleaned from Square's side (they don't expire visibly and incur no cost in sandbox). Lifespan handler is verified working — no need to recheck unless server.py changes. /api/webhook/square correctly returns 400 on missing/invalid signature; not tested with a real valid signature since SQUARE_WEBHOOK_SIGNATURE_KEY produces signatures we'd just be reproducing (would require generating an HMAC in test which only verifies our own code path).",
+  "rca of the issue": "No issues found. Spot-checked the v3 swap deltas:\n  (1) Square swap — sq.create_payment_link returns {id, url, order_id, long_url}; server.py L676-690 stores session_id=link.id, order_id=link.order_id, provider='square'. /payments/checkout/status (L695-752) gracefully degrades when sq.get_order raises (try/except around Square call, falls back to cached txn). Webhook validates HMAC via hmac.compare_digest with the constructed `url + raw_body` payload per Square docs.\n  (2) Notifications — send_email/send_slack both write to {email,slack}_outbox with mocked=true (RESEND_API_KEY/SLACK_WEBHOOK_URL unset confirmed in /app/backend/.env). promote_target (L483-498) fires exactly 1 email + 1 slack. update_deal (L623-642) fires Slack on any stage change, plus email only on closed_won — verified by test_stage_change_inserts_slack.\n  (3) Outbox — both collections filtered by user_id, _id excluded, sorted by created_at desc.\n  (4) Lifespan — @asynccontextmanager at L32-37, registered via FastAPI(..., lifespan=lifespan). Backend log: 'INFO - Nexus AI starting up' / 'INFO - Nexus AI shut down' — no @on_event deprecation warnings in any startup since the change."
+}

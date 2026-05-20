@@ -5,37 +5,35 @@ import { api, fmtUSD } from "../lib/api";
 
 export default function CheckoutReturn() {
   const [params] = useSearchParams();
-  const sessionId = params.get("session_id");
+  // Square redirects with transactionId / orderId — but we stored session_id locally.
+  // We let the user navigate back to /app/subscribe where we can show subscription state.
+  const sessionId = params.get("session_id") || params.get("transactionId") || params.get("orderId");
   const navigate = useNavigate();
   const [status, setStatus] = useState({ phase: "polling", data: null, error: null });
   const attemptsRef = useRef(0);
   const timerRef = useRef(null);
 
   useEffect(() => {
-    if (!sessionId) {
-      setStatus({ phase: "error", error: "Missing session id" });
-      return;
-    }
+    // First, check current subscription state via /payments/subscription
+    const checkSub = async () => {
+      try {
+        const r = await api.get("/payments/subscription");
+        if (r.data.active) {
+          setStatus({ phase: "success", data: r.data });
+          return true;
+        }
+      } catch {}
+      return false;
+    };
+
     const poll = async () => {
       attemptsRef.current += 1;
-      try {
-        const r = await api.get(`/payments/checkout/status/${sessionId}`);
-        if (r.data.payment_status === "paid") {
-          setStatus({ phase: "success", data: r.data });
-          return;
-        }
-        if (r.data.status === "expired") {
-          setStatus({ phase: "error", error: "Payment session expired" });
-          return;
-        }
-        if (attemptsRef.current >= 8) {
-          setStatus({ phase: "timeout", data: r.data });
-          return;
-        }
-        timerRef.current = setTimeout(poll, 2000);
-      } catch (e) {
-        setStatus({ phase: "error", error: e?.response?.data?.detail || e.message });
+      if (await checkSub()) return;
+      if (attemptsRef.current >= 6) {
+        setStatus({ phase: "timeout" });
+        return;
       }
+      timerRef.current = setTimeout(poll, 2500);
     };
     poll();
     return () => clearTimeout(timerRef.current);
@@ -48,14 +46,16 @@ export default function CheckoutReturn() {
           <>
             <Loader2 className="mx-auto animate-spin mb-4" size={28} color="var(--nx-cyan)" />
             <div className="font-serif text-3xl mb-2">Confirming payment</div>
-            <div className="nx-label">VERIFYING WITH STRIPE · {attemptsRef.current}/8</div>
+            <div className="nx-label">VERIFYING WITH SQUARE · {attemptsRef.current}/6</div>
           </>
         )}
         {status.phase === "success" && (
           <>
             <CheckCircle2 className="mx-auto mb-4" size={36} color="var(--nx-cyan)" />
             <div className="font-serif text-3xl mb-2">Subscription active.</div>
-            <div className="nx-label mb-6">PACKAGE: {status.data?.package_id?.toUpperCase()} · {fmtUSD((status.data?.amount_total || 0) / 100)}</div>
+            <div className="nx-label mb-6">
+              PLAN: {status.data?.package?.name?.toUpperCase()} · {fmtUSD(status.data?.package?.amount || 0)}/MO
+            </div>
             <button onClick={() => navigate("/app/dashboard")} className="nx-btn-primary w-full justify-center" data-testid="go-dashboard">
               Enter command center
             </button>
@@ -64,9 +64,12 @@ export default function CheckoutReturn() {
         {status.phase === "timeout" && (
           <>
             <AlertCircle className="mx-auto mb-4" size={28} color="var(--nx-orange)" />
-            <div className="font-serif text-2xl mb-2">Still processing</div>
-            <div className="text-zinc-400 text-sm mb-6">Check back in a minute. We'll email a receipt.</div>
-            <button onClick={() => navigate("/app/dashboard")} className="nx-btn-ghost w-full justify-center">Back to dashboard</button>
+            <div className="font-serif text-2xl mb-2">Payment confirmation pending</div>
+            <div className="text-zinc-400 text-sm mb-6">Square is processing your payment. We'll mark your subscription active shortly via webhook.</div>
+            <div className="flex gap-3">
+              <button onClick={() => navigate("/app/subscribe")} className="nx-btn-ghost flex-1 justify-center">Back to billing</button>
+              <button onClick={() => navigate("/app/dashboard")} className="nx-btn-primary flex-1 justify-center">Dashboard</button>
+            </div>
           </>
         )}
         {status.phase === "error" && (

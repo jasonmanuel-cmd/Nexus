@@ -8,6 +8,7 @@ import json
 import random
 import logging
 import httpx
+from contextlib import asynccontextmanager
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
@@ -18,18 +19,25 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
-)
+from integrations import square_client as sq
+from integrations.notifications import send_email, send_slack
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
-STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
 
-app = FastAPI(title="Nexus AI - Autonomous CRO")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logging.info("Nexus AI starting up")
+    yield
+    client.close()
+    logging.info("Nexus AI shut down")
+
+
+app = FastAPI(title="Nexus AI - Autonomous CRO", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
 
 
@@ -460,6 +468,35 @@ async def promote_target(target_id: str, user: User = Depends(get_current_user))
         status="thinking",
     )
     await db.activities.insert_one(dict(act.model_dump()))
+
+    # Fire personalized outreach email (MOCKED via stub) + Slack
+    dm_name = target.get("decision_maker_name", "there")
+    dm_first = dm_name.split(" ")[0] if dm_name else "there"
+    intro_subject = f"Quick thought on {target['company_name']}'s {target.get('signal_strength', 0)}/100 intent signal"
+    intro_body = (
+        f"Hi {dm_first},\n\n"
+        f"Noticed {target['company_name']} just hit a fresh signal: {target.get('intent_signal','')}. "
+        f"For teams like yours at that stage, we're typically able to compress sales cycles 30%+.\n\n"
+        f"Worth a 15-min look? I'll send 2-3 options.\n\n"
+        f"— Nexus AI on behalf of {user.name or user.email}"
+    )
+    await send_email(
+        db,
+        to=f"{dm_first.lower()}@{target.get('company_name', 'example').lower().replace(' ', '')}.com",
+        subject=intro_subject,
+        body=intro_body,
+        user_id=user.user_id,
+        kind="promote.intro",
+        meta={"target_id": target_id, "deal_id": deal.id, "decision_maker": dm_name},
+    )
+    await send_slack(
+        db,
+        text=f":sparkles: *{target['company_name']}* promoted to pipeline · ${int(deal.value):,} · DM: {dm_name}",
+        user_id=user.user_id,
+        kind="target.promoted",
+        meta={"target_id": target_id, "deal_id": deal.id},
+    )
+
     return {"deal": deal.model_dump(), "already_promoted": False}
 
 
@@ -575,20 +612,39 @@ async def create_deal(payload: DealCreate, user: User = Depends(get_current_user
 
 @api_router.patch("/pipeline/deals/{deal_id}", response_model=Deal)
 async def update_deal(deal_id: str, payload: DealUpdate, user: User = Depends(get_current_user)):
+    existing = await db.deals.find_one({"id": deal_id, "user_id": user.user_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Deal not found")
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
     updates["updated_at"] = now_iso()
-    res = await db.deals.update_one({"id": deal_id, "user_id": user.user_id}, {"$set": updates})
-    if res.matched_count == 0:
-        raise HTTPException(404, "Deal not found")
+    await db.deals.update_one({"id": deal_id, "user_id": user.user_id}, {"$set": updates})
     doc = await db.deals.find_one({"id": deal_id, "user_id": user.user_id}, {"_id": 0})
+
+    # Slack notification on stage change
+    if payload.stage and payload.stage != existing.get("stage"):
+        emoji = ":tada:" if payload.stage == "closed_won" else ":chart_with_upwards_trend:"
+        await send_slack(
+            db,
+            text=f"{emoji} *{doc['company']}* moved {existing.get('stage')} → *{payload.stage}* (${doc.get('value', 0):,.0f})",
+            user_id=user.user_id,
+            kind=f"deal.stage.{payload.stage}",
+            meta={"deal_id": deal_id, "from": existing.get("stage"), "to": payload.stage},
+        )
+        if payload.stage == "closed_won":
+            await send_email(
+                db,
+                to=user.email,
+                subject=f"🎉 Deal won: {doc['company']} (${doc.get('value', 0):,.0f})",
+                body=f"Congrats — your AI agents just closed {doc['company']} for ${doc.get('value', 0):,.0f}.\n\nContact: {doc.get('contact')}\nLast action: {doc.get('last_action')}",
+                user_id=user.user_id,
+                kind="deal.won",
+                meta={"deal_id": deal_id},
+            )
     return Deal(**doc)
 
 
-# ---------- Stripe Payments ----------
-PACKAGES = {
-    "operator": {"amount": 4800.0, "name": "Operator", "description": "3 AI agents · 500 prospects/mo"},
-    "scale":    {"amount": 18500.0, "name": "Scale",   "description": "7 AI agents · Unlimited prospects"},
-}
+# ---------- Square Payments ----------
+PACKAGES = sq.PACKAGES
 
 
 class CheckoutCreate(BaseModel):
@@ -597,83 +653,78 @@ class CheckoutCreate(BaseModel):
 
 
 @api_router.post("/payments/checkout/session")
-async def create_checkout(payload: CheckoutCreate, request: Request, user: User = Depends(get_current_user)):
-    pkg = PACKAGES.get(payload.package_id)
-    if not pkg:
+async def create_checkout(payload: CheckoutCreate, user: User = Depends(get_current_user)):
+    if payload.package_id not in PACKAGES:
         raise HTTPException(400, "Invalid package")
-    if not STRIPE_API_KEY:
-        raise HTTPException(500, "Stripe not configured")
-
-    host_url = str(request.base_url)
-    webhook_url = f"{host_url}api/webhook/stripe".replace("//api", "/api")
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    if not os.environ.get("SQUARE_ACCESS_TOKEN"):
+        raise HTTPException(500, "Square not configured")
 
     origin = payload.origin_url.rstrip("/")
-    success_url = f"{origin}/app/checkout-return?session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = f"{origin}/app/dashboard"
+    redirect_url = f"{origin}/app/checkout-return"
 
-    req = CheckoutSessionRequest(
-        amount=pkg["amount"],
-        currency="usd",
-        success_url=success_url,
-        cancel_url=cancel_url,
-        metadata={"user_id": user.user_id, "package_id": payload.package_id, "email": user.email},
-    )
-    session = await stripe.create_checkout_session(req)
+    try:
+        link = await sq.create_payment_link(
+            package_id=payload.package_id,
+            redirect_url=redirect_url,
+            user_id=user.user_id,
+            email=user.email,
+        )
+    except Exception as e:
+        logging.error(f"Square link create failed: {e}")
+        raise HTTPException(502, f"Square error: {str(e)[:160]}")
 
     await db.payment_transactions.insert_one({
-        "session_id": session.session_id,
+        "session_id": link["id"],          # Square payment_link id
+        "order_id": link.get("order_id"),
         "user_id": user.user_id,
         "email": user.email,
         "package_id": payload.package_id,
-        "amount": pkg["amount"],
+        "amount": PACKAGES[payload.package_id]["amount"],
         "currency": "usd",
         "payment_status": "initiated",
         "status": "open",
+        "provider": "square",
         "metadata": {"package_id": payload.package_id, "user_id": user.user_id},
         "created_at": now_iso(),
         "updated_at": now_iso(),
     })
 
-    return {"url": session.url, "session_id": session.session_id}
+    return {"url": link["url"], "session_id": link["id"]}
 
 
 @api_router.get("/payments/checkout/status/{session_id}")
-async def checkout_status(session_id: str, request: Request, user: User = Depends(get_current_user)):
-    if not STRIPE_API_KEY:
-        raise HTTPException(500, "Stripe not configured")
-    host_url = str(request.base_url)
-    webhook_url = f"{host_url}api/webhook/stripe".replace("//api", "/api")
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-
+async def checkout_status(session_id: str, user: User = Depends(get_current_user)):
     txn = await db.payment_transactions.find_one({"session_id": session_id, "user_id": user.user_id}, {"_id": 0})
     if not txn:
         raise HTTPException(404, "Transaction not found")
 
+    # Try to query Square for order status if we have an order_id
+    order_id = txn.get("order_id")
+    detected_paid = False
     try:
-        status: CheckoutStatusResponse = await stripe.get_checkout_status(session_id)
+        if order_id:
+            order = await sq.get_order(order_id)
+            state = (order.get("state") or "").upper()
+            if state == "COMPLETED":
+                detected_paid = True
     except Exception as e:
-        logging.warning(f"Stripe status lookup failed for {session_id}: {e}")
-        return {
-            "session_id": session_id,
-            "status": txn.get("status", "open"),
-            "payment_status": txn.get("payment_status", "pending"),
-            "amount_total": int(txn.get("amount", 0) * 100),
-            "currency": txn.get("currency", "usd"),
-            "package_id": txn.get("package_id"),
-        }
+        logging.warning(f"Square order lookup failed for {order_id}: {e}")
 
-    new_payment_status = status.payment_status
-    if txn["payment_status"] != "paid" and new_payment_status == "paid":
+    new_payment_status = "paid" if detected_paid else txn.get("payment_status", "initiated")
+    if detected_paid and txn["payment_status"] != "paid":
         await db.payment_transactions.update_one(
             {"session_id": session_id},
-            {"$set": {"payment_status": new_payment_status, "status": status.status, "updated_at": now_iso()}},
+            {"$set": {"payment_status": "paid", "status": "complete", "updated_at": now_iso()}},
         )
         await db.users.update_one(
             {"user_id": user.user_id},
-            {"$set": {"subscription_package": txn.get("package_id"), "subscription_active": True, "subscribed_at": now_iso()}},
+            {"$set": {
+                "subscription_package": txn.get("package_id"),
+                "subscription_active": True,
+                "subscribed_at": now_iso(),
+                "renews_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+            }},
         )
-        # Activity log
         act = Activity(
             user_id=user.user_id,
             agent="Pipeline-Analyst",
@@ -683,48 +734,117 @@ async def checkout_status(session_id: str, request: Request, user: User = Depend
             status="closing",
         )
         await db.activities.insert_one(dict(act.model_dump()))
-    elif txn["payment_status"] != new_payment_status:
-        await db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": new_payment_status, "status": status.status, "updated_at": now_iso()}},
+        await send_slack(
+            db,
+            text=f":rocket: *{user.email}* activated *{PACKAGES.get(txn.get('package_id'), {}).get('name', 'Plan')}* plan (${txn.get('amount', 0):,.0f}/mo)",
+            user_id=user.user_id,
+            kind="subscription.activated",
         )
 
     return {
         "session_id": session_id,
-        "status": status.status,
+        "status": "complete" if detected_paid else txn.get("status", "open"),
         "payment_status": new_payment_status,
-        "amount_total": status.amount_total,
-        "currency": status.currency,
+        "amount_total": int(txn.get("amount", 0) * 100),
+        "currency": txn.get("currency", "usd"),
         "package_id": txn.get("package_id"),
+        "provider": "square",
     }
 
 
-@api_router.post("/webhook/stripe")
-async def stripe_webhook(request: Request):
-    if not STRIPE_API_KEY:
-        return {"ok": False}
-    body = await request.body()
-    sig = request.headers.get("Stripe-Signature")
-    host_url = str(request.base_url)
-    webhook_url = f"{host_url}api/webhook/stripe".replace("//api", "/api")
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    try:
-        evt = await stripe.handle_webhook(body, sig)
-    except Exception as e:
-        logging.error(f"Stripe webhook error: {e}")
-        return {"ok": False}
+@api_router.post("/webhook/square")
+async def square_webhook(request: Request):
+    raw = await request.body()
+    sig = request.headers.get("x-square-hmacsha256-signature", "")
+    if not sq.validate_webhook(raw, sig):
+        logging.warning("Square webhook signature mismatch")
+        return Response(status_code=400)
 
-    if evt.session_id:
-        await db.payment_transactions.update_one(
-            {"session_id": evt.session_id},
-            {"$set": {"payment_status": evt.payment_status, "webhook_event": evt.event_type, "updated_at": now_iso()}},
-        )
+    try:
+        evt = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return Response(status_code=400)
+
+    event_type = evt.get("type", "")
+    data = evt.get("data", {}).get("object", {}) or {}
+    logging.info(f"Square webhook: {event_type}")
+
+    # Payment events: mark transaction paid
+    if event_type.startswith("payment."):
+        payment = data.get("payment") or {}
+        order_id = payment.get("order_id")
+        status = (payment.get("status") or "").upper()
+        if order_id and status == "COMPLETED":
+            await db.payment_transactions.update_one(
+                {"order_id": order_id},
+                {"$set": {"payment_status": "paid", "status": "complete", "updated_at": now_iso()}},
+            )
+            txn = await db.payment_transactions.find_one({"order_id": order_id}, {"_id": 0})
+            if txn:
+                await db.users.update_one(
+                    {"user_id": txn["user_id"]},
+                    {"$set": {
+                        "subscription_package": txn.get("package_id"),
+                        "subscription_active": True,
+                        "subscribed_at": now_iso(),
+                        "renews_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+                    }},
+                )
     return {"ok": True}
 
 
 @api_router.get("/payments/packages")
 async def list_packages():
     return {"packages": [{"id": k, **v} for k, v in PACKAGES.items()]}
+
+
+@api_router.get("/payments/subscription")
+async def get_subscription(user: User = Depends(get_current_user)):
+    """Return current subscription state for the authenticated user."""
+    u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    return {
+        "active": bool(u.get("subscription_active")),
+        "package_id": u.get("subscription_package"),
+        "package": PACKAGES.get(u.get("subscription_package") or "", None),
+        "subscribed_at": u.get("subscribed_at"),
+        "renews_at": u.get("renews_at"),
+    }
+
+
+@api_router.post("/payments/subscription/cancel")
+async def cancel_subscription(user: User = Depends(get_current_user)):
+    """Cancel subscription (immediate in this demo). Logs activity + Slack."""
+    u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not u or not u.get("subscription_active"):
+        raise HTTPException(404, "No active subscription")
+    pkg_id = u.get("subscription_package")
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"subscription_active": False, "canceled_at": now_iso()}},
+    )
+    act = Activity(
+        user_id=user.user_id,
+        agent="Pipeline-Analyst",
+        action="Subscription canceled",
+        target=PACKAGES.get(pkg_id or "", {}).get("name", "Plan"),
+        status="idle",
+    )
+    await db.activities.insert_one(dict(act.model_dump()))
+    await send_slack(
+        db,
+        text=f":wave: *{user.email}* canceled *{PACKAGES.get(pkg_id or '', {}).get('name', 'Plan')}* plan",
+        user_id=user.user_id,
+        kind="subscription.canceled",
+    )
+    return {"ok": True, "canceled_package": pkg_id}
+
+
+# ---------- Outbox (for inspecting MOCKED notifications) ----------
+@api_router.get("/notifications/outbox")
+async def get_outbox(user: User = Depends(get_current_user), limit: int = 50):
+    emails = await db.email_outbox.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    slacks = await db.slack_outbox.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return {"emails": emails, "slack_messages": slacks}
 
 
 # ============== SEED DATA ==============
@@ -785,8 +905,3 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
