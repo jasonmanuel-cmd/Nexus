@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import { api, fmtUSD } from "../lib/api";
+import { useAuth } from "../lib/AuthContext";
 import AgentStatus from "../components/AgentStatus";
 import { Rocket, Building2, ChevronRight, CheckCircle2, Loader2, Sparkles, ArrowUpRight, GitBranch } from "lucide-react";
 
@@ -32,8 +33,12 @@ const TERMINAL_LINES = [
 ];
 
 export default function Onboarding() {
+  const navigate = useNavigate();
+  const { user } = useAuth();
   const [step, setStep] = useState(0);
   const [profileId, setProfileId] = useState(null);
+  const [promoting, setPromoting] = useState(null);
+  const [promoted, setPromoted] = useState({});
   const [form, setForm] = useState({
     company_name: "",
     industry: "",
@@ -48,34 +53,37 @@ export default function Onboarding() {
   const [targets, setTargets] = useState([]);
   const [error, setError] = useState(null);
 
-  // Load latest profile + targets on mount
+  // Load latest profile + targets on mount — but only after auth resolves
   useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
     (async () => {
       try {
         const p = await api.get("/onboarding/latest");
-        if (p.data && p.data.id) {
-          setProfileId(p.data.id);
-          setForm({
-            company_name: p.data.company_name || "",
-            industry: p.data.industry || "",
-            company_size: p.data.company_size || "",
-            annual_revenue: p.data.annual_revenue || "",
-            icp_description: p.data.icp_description || "",
-            value_proposition: p.data.value_proposition || "",
-            target_geographies: p.data.target_geographies || [],
-          });
-          const t = await api.get("/targets", { params: { profile_id: p.data.id } });
-          if (t.data.targets?.length) {
-            setTargets(t.data.targets);
-            const initialPromoted = {};
-            t.data.targets.forEach((tgt) => { if (tgt.promoted_deal_id) initialPromoted[tgt.id] = tgt.promoted_deal_id; });
-            setPromoted(initialPromoted);
-            setPhase("results");
-          }
+        if (cancelled || !p.data || !p.data.id) return;
+        setProfileId(p.data.id);
+        setForm({
+          company_name: p.data.company_name || "",
+          industry: p.data.industry || "",
+          company_size: p.data.company_size || "",
+          annual_revenue: p.data.annual_revenue || "",
+          icp_description: p.data.icp_description || "",
+          value_proposition: p.data.value_proposition || "",
+          target_geographies: p.data.target_geographies || [],
+        });
+        const t = await api.get("/targets", { params: { profile_id: p.data.id } });
+        if (cancelled) return;
+        if (t.data.targets?.length) {
+          setTargets(t.data.targets);
+          const initialPromoted = {};
+          t.data.targets.forEach((tgt) => { if (tgt.promoted_deal_id) initialPromoted[tgt.id] = tgt.promoted_deal_id; });
+          setPromoted(initialPromoted);
+          setPhase("results");
         }
       } catch (e) { /* ignore */ }
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [user]);
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const toggleGeo = (g) => setForm((f) => ({ ...f, target_geographies: f.target_geographies.includes(g) ? f.target_geographies.filter((x) => x !== g) : [...f.target_geographies, g] }));

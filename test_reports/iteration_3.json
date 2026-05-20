@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration 3 re-verification of two HIGH bugs from iteration_2 plus light regression on v2 features. BOTH BUGS NOW FIXED. Backend: 14/14 pytest cases pass (was 13/14) — checkout/status now returns 200 even after immediate creation (try/except around stripe.get_checkout_status falls back to cached txn). Frontend: /app/onboarding with demo session cookie now correctly transitions to results phase on mount (useEffect gated on `user` from AuthContext). Verified: results-panel rendered, all 10 target-promote-{0..9} buttons present, clicked target-promote-1 (TalentFlow Systems) → POST /api/targets/{id}/promote returned 200, button text changed from 'PROMOTE TO PIPELINE' to 'VIEW IN PIPELINE', and the promoted deal appears in the Prospecting column on /app/pipeline (14 total cards). Regression: dashboard charts render (recharts containers detected), unauth user redirected from /app/dashboard to /login with [data-testid=google-signin-btn] visible.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/app/dashboard initial mount", "issues": ["Recharts emits 'width(-1) and height(-1) of chart should be greater than 0' warning a few times during initial layout — not breaking (130 recharts elements render correctly after settle), but ResponsiveContainer may briefly mount before its parent has dimensions. Consider giving the chart wrapper an explicit min-height or aspect ratio to silence the warning."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_nexus_v2.py",
+    "/app/test_reports/pytest/pytest_v2_iter3.xml"
+  ],
+  "action_items": [
+    "None blocking. Both HIGH bugs are verified fixed. Optional: tidy Recharts ResponsiveContainer warnings on /app/dashboard by giving the chart wrapper a min-height.",
+    "Carry-over (non-blocking from iteration_2): consider splitting server.py (now 793 lines) into routers; migrate @app.on_event to lifespan handler; normalize payment_status values to Stripe-canonical ('unpaid'/'paid'/'no_payment_required') instead of 'initiated'."
+  ],
+  "critical_code_review_comments": [
+    "Fix in /api/payments/checkout/status (server.py L653-664) is correct: wraps stripe.get_checkout_status in try/except Exception and returns the cached txn row with amount_total computed as int(amount*100). Safe fallback shape matches the success branch.",
+    "Fix in Onboarding.jsx useEffect (L57-86) is correct: effect now guards on `if (!user) return` and depends on [user], so the auto-load fires only after AuthContext resolves /auth/me. The cancelled flag also prevents stale state writes if user changes mid-flight.",
+    "Carry-over: server.py is now 793 lines — still recommend splitting into routers (auth/payments/dashboard/leads/pipeline/onboarding/targets) per code-review guidelines.",
+    "Carry-over: @app.on_event('startup'/'shutdown') is deprecated in FastAPI; migrate to lifespan context manager.",
+    "Carry-over: payment_transactions.payment_status diverges from Stripe-canonical values (uses 'initiated' instead of 'unpaid'). Consider normalizing for consistency with Stripe webhooks."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% (5/5 flows: onboarding-results, promote, pipeline visibility, dashboard charts, unauth login redirect)"},
+  "test_credentials": "Demo session token: demo_session_token_persistent (Bearer header or cookie). user_id=demo-user-001, email=demo@nexus.ai. See /app/memory/test_credentials.md.",
+  "seed_data_creation": "Reused existing TEST_Promote_* profile + 10 generated targets seeded in iteration_2. Promoted one additional target (TalentFlow Systems) to demo user's pipeline — this is now a permanent demo deal in Prospecting column. Test created 2 transient Stripe checkout sessions for status verification (one cleaned, one left for status test as before).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All v2 features verified working: auth gating, charts, target promotion (full E2E from onboarding results → POST /promote → pipeline visibility), Stripe checkout creation + graceful status polling, DnD pipeline (verified iter_2), Landing routing for unauth, /login google-signin-btn. Pytest suite /app/backend/tests/test_nexus_v2.py is idempotent and safe to rerun. The previously-blocked target-promote E2E flow is now fully testable via the demo cookie.",
+  "rca of the issue": "Both fixes confirmed via direct reproduction: (1) BUG 1 — wrapping stripe.get_checkout_status in try/except Exception in /api/payments/checkout/status/{session_id} (server.py L653) now returns 200 with the cached payment_transactions row when Stripe raises (e.g. 'No such checkout.session' immediately after create). Verified by test_checkout_status_open which posts a checkout session and immediately polls status — now consistently 200. (2) BUG 2 — adding `if (!user) return` guard and `[user]` dependency to Onboarding.jsx useEffect (L57-86) eliminates the AuthContext-induced remount race. The effect now fires only after /auth/me resolves and `user` is non-null, so setPhase('results') is not interrupted by a ProtectedRoute re-mount. Verified by navigating to /app/onboarding with demo cookie set → results-panel + 10 target-promote buttons render within 3s."
+}

@@ -650,7 +650,18 @@ async def checkout_status(session_id: str, request: Request, user: User = Depend
     if not txn:
         raise HTTPException(404, "Transaction not found")
 
-    status: CheckoutStatusResponse = await stripe.get_checkout_status(session_id)
+    try:
+        status: CheckoutStatusResponse = await stripe.get_checkout_status(session_id)
+    except Exception as e:
+        logging.warning(f"Stripe status lookup failed for {session_id}: {e}")
+        return {
+            "session_id": session_id,
+            "status": txn.get("status", "open"),
+            "payment_status": txn.get("payment_status", "pending"),
+            "amount_total": int(txn.get("amount", 0) * 100),
+            "currency": txn.get("currency", "usd"),
+            "package_id": txn.get("package_id"),
+        }
 
     new_payment_status = status.payment_status
     if txn["payment_status"] != "paid" and new_payment_status == "paid":
