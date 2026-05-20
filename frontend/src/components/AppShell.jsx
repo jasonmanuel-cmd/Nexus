@@ -1,6 +1,6 @@
 import React from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { Activity, Radar, GitBranch, Rocket, ChevronLeft, Cpu, CreditCard, LogOut, Inbox } from "lucide-react";
+import { Activity, Radar, GitBranch, Rocket, ChevronLeft, Cpu, CreditCard, LogOut, Inbox, MessageSquare } from "lucide-react";
 import { useAuth } from "../lib/AuthContext";
 
 const NAV = [
@@ -8,6 +8,7 @@ const NAV = [
   { to: "/app/lead-engine", label: "LEAD ENGINE",    icon: Radar,    testid: "nav-lead-engine" },
   { to: "/app/pipeline",    label: "PIPELINE",       icon: GitBranch, testid: "nav-pipeline" },
   { to: "/app/onboarding",  label: "BETA ONBOARD",   icon: Rocket,   testid: "nav-onboarding" },
+  { to: "/app/replies",     label: "REPLIES QUEUE",  icon: MessageSquare, testid: "nav-replies" },
   { to: "/app/outbox",      label: "AGENT OUTBOX",   icon: Inbox,    testid: "nav-outbox" },
   { to: "/app/subscribe",   label: "BILLING",        icon: CreditCard, testid: "nav-billing" },
 ];

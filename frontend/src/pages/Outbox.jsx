@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import AgentStatus from "../components/AgentStatus";
-import { Mail, MessageSquare, Inbox, RefreshCw } from "lucide-react";
+import { Mail, MessageSquare, Inbox, RefreshCw, Loader2, ArrowDownRight } from "lucide-react";
 
 const formatTime = (iso) => {
   try {
@@ -17,6 +18,9 @@ export default function Outbox() {
   const [data, setData] = useState({ emails: [], slack_messages: [] });
   const [tab, setTab] = useState("email");
   const [loading, setLoading] = useState(true);
+  const [simulating, setSimulating] = useState(null);
+  const [simulatedIds, setSimulatedIds] = useState(new Set());
+  const navigate = useNavigate();
 
   const fetch = async () => {
     setLoading(true);
@@ -29,6 +33,20 @@ export default function Outbox() {
   };
 
   useEffect(() => { fetch(); }, []);
+
+  const simulate = async (emailId) => {
+    setSimulating(emailId);
+    try {
+      await api.post(`/notifications/email/${emailId}/simulate-reply`);
+      setSimulatedIds((s) => new Set([...s, emailId]));
+      // Redirect to replies queue after a short pause so user sees the success
+      setTimeout(() => navigate("/app/replies"), 700);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSimulating(null);
+    }
+  };
 
   return (
     <div className="p-6 lg:p-10" data-testid="outbox-page">
@@ -95,6 +113,24 @@ export default function Outbox() {
               </div>
               <div className="text-xs text-zinc-500 mb-2">to: {e.to} · kind: {e.kind}</div>
               <div className="text-sm text-zinc-400 whitespace-pre-wrap border-l-2 pl-3" style={{ borderColor: "var(--nx-border-strong)" }}>{e.body}</div>
+              {(e.kind === "promote.intro" || e.kind === "reply.followup") && (
+                <div className="mt-4 pt-3 border-t flex items-center justify-end gap-3" style={{ borderColor: "var(--nx-border)" }}>
+                  <button
+                    onClick={() => simulate(e.id)}
+                    disabled={simulating === e.id || simulatedIds.has(e.id)}
+                    className="nx-btn-ghost"
+                    data-testid={`simulate-reply-${i}`}
+                  >
+                    {simulating === e.id ? (
+                      <><Loader2 className="animate-spin" size={12} /> Claude thinking…</>
+                    ) : simulatedIds.has(e.id) ? (
+                      <>Reply drafted →</>
+                    ) : (
+                      <><ArrowDownRight size={12} /> Simulate buyer reply</>
+                    )}
+                  </button>
+                </div>
+              )}
             </motion.div>
           ))}
           {tab === "slack" && data.slack_messages.map((s, i) => (

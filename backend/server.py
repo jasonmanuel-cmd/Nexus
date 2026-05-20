@@ -847,6 +847,267 @@ async def get_outbox(user: User = Depends(get_current_user), limit: int = 50):
     return {"emails": emails, "slack_messages": slacks}
 
 
+# ---------- Autonomous Reply Loop ----------
+REPLY_SIMULATION_PROMPT = """You are simulating a realistic B2B buyer's reply to a cold outreach email.
+
+You will receive: (1) the original outreach (subject + body), (2) the prospect company name + decision-maker name/title.
+
+Generate ONE plausible reply. Vary tone naturally — sometimes interested, sometimes skeptical, sometimes deferring, sometimes objecting on price/timing, occasionally enthusiastic. Match how a real executive would write — concise, no fluff, 2-4 sentences max. After the reply, classify it.
+
+Then, draft Nexus AI's CONTEXTUAL follow-up that:
+- Directly addresses the specific point the buyer raised (don't repeat the original pitch)
+- If positive/interested → propose specific next step (15-min slot, demo Tuesday/Wednesday, send pricing)
+- If wants info → send a concrete artifact (ROI model, case study, pricing tier)
+- If objecting on price/timing → reframe with a small commitment (pilot, 30-day trial)
+- If not_now / deferring → polite nurture, schedule check-in for a future quarter
+- Always be specific, never generic. Mention something from their reply.
+
+Also compute a probability_delta (integer):
+- positive/interested → +20 to +30
+- wants_info → +10
+- neutral → 0
+- objecting → -5 to -10
+- not_now → -15 to -20
+
+RESPOND WITH STRICT JSON ONLY (no markdown, no code fences):
+{
+  "buyer_reply": {
+    "body": "<2-4 sentence realistic reply>",
+    "sentiment": "positive|neutral|negative",
+    "intent": "interested|wants_info|deferring|objecting|not_now"
+  },
+  "drafted_followup": {
+    "subject": "<concrete subject>",
+    "body": "<contextual follow-up, 3-6 sentences>",
+    "probability_delta": <int>,
+    "suggested_action": "<one-line action for the human reviewer>"
+  }
+}"""
+
+
+class EmailReply(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    original_email_id: str
+    from_address: str
+    body: str
+    sentiment: str
+    intent: str
+    received_at: str = Field(default_factory=now_iso)
+
+
+class ReplyDraft(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    reply_id: str
+    original_email_id: str
+    deal_id: Optional[str] = None
+    subject: str
+    body: str
+    probability_delta: int = 0
+    suggested_action: str = ""
+    sentiment: str
+    intent: str
+    status: Literal["pending", "sent", "dismissed"] = "pending"
+    created_at: str = Field(default_factory=now_iso)
+    sent_at: Optional[str] = None
+
+
+@api_router.post("/notifications/email/{email_id}/simulate-reply")
+async def simulate_reply(email_id: str, user: User = Depends(get_current_user)):
+    """Generate a plausible buyer reply via Claude + an AI-drafted follow-up. Stores both."""
+    email_doc = await db.email_outbox.find_one({"id": email_id, "user_id": user.user_id}, {"_id": 0})
+    if not email_doc:
+        raise HTTPException(404, "Email not found")
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(500, "LLM key not configured")
+
+    # Resolve deal context if email is linked to a target/deal
+    target_meta = email_doc.get("meta") or {}
+    deal_id = target_meta.get("deal_id")
+    target_id = target_meta.get("target_id")
+    deal_doc = None
+    target_doc = None
+    if deal_id:
+        deal_doc = await db.deals.find_one({"id": deal_id, "user_id": user.user_id}, {"_id": 0})
+    if target_id:
+        target_doc = await db.targets.find_one({"id": target_id, "user_id": user.user_id}, {"_id": 0})
+
+    company = (deal_doc or {}).get("company") or (target_doc or {}).get("company_name") or "Unknown Co"
+    contact = (deal_doc or {}).get("contact") or f"{(target_doc or {}).get('decision_maker_name', 'Decision Maker')}, {(target_doc or {}).get('decision_maker_title', 'VP')}"
+
+    user_prompt = f"""Original outreach:
+SUBJECT: {email_doc.get('subject', '')}
+BODY:
+{email_doc.get('body', '')}
+
+Prospect: {company}
+Decision-maker: {contact}
+Intent signal: {(target_doc or {}).get('intent_signal', 'n/a')}
+
+Generate the buyer reply + Nexus AI's drafted follow-up in strict JSON."""
+
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"reply-{email_id}-{uuid.uuid4().hex[:8]}",
+            system_message=REPLY_SIMULATION_PROMPT,
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        response_text = await chat.send_message(UserMessage(text=user_prompt))
+        cleaned = response_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```", 2)[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.rsplit("```", 1)[0]
+        cleaned = cleaned.strip()
+        parsed = json.loads(cleaned)
+    except Exception as e:
+        logging.error(f"Reply simulation LLM error: {e}")
+        raise HTTPException(500, f"AI failed: {str(e)[:160]}")
+
+    buyer = parsed.get("buyer_reply", {})
+    draft = parsed.get("drafted_followup", {})
+
+    reply = EmailReply(
+        user_id=user.user_id,
+        original_email_id=email_id,
+        from_address=email_doc.get("to", ""),
+        body=str(buyer.get("body", "")),
+        sentiment=str(buyer.get("sentiment", "neutral")),
+        intent=str(buyer.get("intent", "wants_info")),
+    )
+    await db.email_replies.insert_one(dict(reply.model_dump()))
+
+    draft_obj = ReplyDraft(
+        user_id=user.user_id,
+        reply_id=reply.id,
+        original_email_id=email_id,
+        deal_id=deal_id,
+        subject=str(draft.get("subject", f"Re: {email_doc.get('subject', '')}")),
+        body=str(draft.get("body", "")),
+        probability_delta=int(draft.get("probability_delta", 0)),
+        suggested_action=str(draft.get("suggested_action", "")),
+        sentiment=reply.sentiment,
+        intent=reply.intent,
+    )
+    await db.reply_drafts.insert_one(dict(draft_obj.model_dump()))
+
+    # Log activity
+    act = Activity(
+        user_id=user.user_id,
+        agent="Outreach-Composer",
+        action=f"Buyer replied ({reply.sentiment}) — draft awaiting review",
+        target=company,
+        outcome=f"{reply.intent} · Δ{draft_obj.probability_delta:+d}%",
+        status="thinking",
+    )
+    await db.activities.insert_one(dict(act.model_dump()))
+    await send_slack(
+        db,
+        text=f":speech_balloon: *{company}* replied ({reply.sentiment}/{reply.intent}). Draft ready for review.",
+        user_id=user.user_id,
+        kind="reply.received",
+        meta={"reply_id": reply.id, "draft_id": draft_obj.id},
+    )
+
+    return {"reply": reply.model_dump(), "draft": draft_obj.model_dump()}
+
+
+@api_router.get("/replies/queue")
+async def list_drafts(user: User = Depends(get_current_user)):
+    """Pending drafts awaiting review. Joins the original email + buyer reply."""
+    drafts = await db.reply_drafts.find({"user_id": user.user_id, "status": "pending"}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    enriched = []
+    for d in drafts:
+        reply = await db.email_replies.find_one({"id": d["reply_id"], "user_id": user.user_id}, {"_id": 0})
+        original = await db.email_outbox.find_one({"id": d["original_email_id"], "user_id": user.user_id}, {"_id": 0})
+        deal = None
+        if d.get("deal_id"):
+            deal = await db.deals.find_one({"id": d["deal_id"], "user_id": user.user_id}, {"_id": 0})
+        enriched.append({"draft": d, "reply": reply, "original": original, "deal": deal})
+    return {"drafts": enriched}
+
+
+class DraftSend(BaseModel):
+    subject: Optional[str] = None
+    body: Optional[str] = None
+
+
+@api_router.post("/replies/{draft_id}/send")
+async def send_draft(draft_id: str, payload: DraftSend, user: User = Depends(get_current_user)):
+    d = await db.reply_drafts.find_one({"id": draft_id, "user_id": user.user_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Draft not found")
+    if d["status"] != "pending":
+        raise HTTPException(409, "Draft already actioned")
+
+    final_subject = payload.subject if payload.subject is not None else d["subject"]
+    final_body = payload.body if payload.body is not None else d["body"]
+    reply = await db.email_replies.find_one({"id": d["reply_id"], "user_id": user.user_id}, {"_id": 0})
+
+    # Queue the actual outbound email (MOCKED)
+    await send_email(
+        db,
+        to=(reply or {}).get("from_address", ""),
+        subject=final_subject,
+        body=final_body,
+        user_id=user.user_id,
+        kind="reply.followup",
+        meta={"draft_id": draft_id, "in_reply_to": d["original_email_id"]},
+    )
+
+    await db.reply_drafts.update_one(
+        {"id": draft_id, "user_id": user.user_id},
+        {"$set": {"status": "sent", "sent_at": now_iso(), "subject": final_subject, "body": final_body}},
+    )
+
+    # Adjust deal probability + agent_status
+    if d.get("deal_id"):
+        deal = await db.deals.find_one({"id": d["deal_id"], "user_id": user.user_id}, {"_id": 0})
+        if deal:
+            new_prob = max(0, min(100, int(deal.get("probability", 0)) + int(d.get("probability_delta", 0))))
+            await db.deals.update_one(
+                {"id": d["deal_id"], "user_id": user.user_id},
+                {"$set": {
+                    "probability": new_prob,
+                    "agent_status": "closing" if d.get("sentiment") == "positive" else "thinking",
+                    "last_action": f"Replied to buyer ({d.get('intent')}) · prob {deal.get('probability',0)}%→{new_prob}%",
+                    "updated_at": now_iso(),
+                }},
+            )
+
+    act = Activity(
+        user_id=user.user_id,
+        agent="Outreach-Composer",
+        action="Reply sent",
+        target=(reply or {}).get("from_address", ""),
+        outcome=f"Δ{d.get('probability_delta', 0):+d}% probability",
+        status="closing" if d.get("sentiment") == "positive" else "thinking",
+    )
+    await db.activities.insert_one(dict(act.model_dump()))
+    return {"ok": True, "draft_id": draft_id}
+
+
+@api_router.delete("/replies/{draft_id}")
+async def dismiss_draft(draft_id: str, user: User = Depends(get_current_user)):
+    res = await db.reply_drafts.update_one(
+        {"id": draft_id, "user_id": user.user_id, "status": "pending"},
+        {"$set": {"status": "dismissed"}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Draft not found or already actioned")
+    return {"ok": True}
+
+
+@api_router.get("/replies/stats")
+async def reply_stats(user: User = Depends(get_current_user)):
+    pending = await db.reply_drafts.count_documents({"user_id": user.user_id, "status": "pending"})
+    sent = await db.reply_drafts.count_documents({"user_id": user.user_id, "status": "sent"})
+    received = await db.email_replies.count_documents({"user_id": user.user_id})
+    return {"pending": pending, "sent": sent, "received": received}
+
+
 # ============== SEED DATA ==============
 SAMPLE_SIGNALS = [
     {"company": "Linearflow Systems", "domain": "linearflow.io", "signal_type": "hiring", "description": "Posted 14 SDR + AE roles in 6 days", "strength": 92, "source": "LinkedIn Jobs"},
