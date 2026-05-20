@@ -811,9 +811,9 @@ async def get_subscription(user: User = Depends(get_current_user)):
     }
 
 
-@api_router.post("/payments/subscription/cancel")
-async def cancel_subscription(user: User = Depends(get_current_user)):
-    """Cancel subscription (immediate in this demo). Logs activity + Slack."""
+@api_router.post("/payments/subscription/cancel_legacy")
+async def cancel_subscription_legacy(user: User = Depends(get_current_user)):
+    """Deprecated — kept for backward compat. New endpoint also at /payments/subscription/cancel uses Square Subscriptions API."""
     u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
     if not u or not u.get("subscription_active"):
         raise HTTPException(404, "No active subscription")
@@ -821,20 +821,6 @@ async def cancel_subscription(user: User = Depends(get_current_user)):
     await db.users.update_one(
         {"user_id": user.user_id},
         {"$set": {"subscription_active": False, "canceled_at": now_iso()}},
-    )
-    act = Activity(
-        user_id=user.user_id,
-        agent="Pipeline-Analyst",
-        action="Subscription canceled",
-        target=PACKAGES.get(pkg_id or "", {}).get("name", "Plan"),
-        status="idle",
-    )
-    await db.activities.insert_one(dict(act.model_dump()))
-    await send_slack(
-        db,
-        text=f":wave: *{user.email}* canceled *{PACKAGES.get(pkg_id or '', {}).get('name', 'Plan')}* plan",
-        user_id=user.user_id,
-        kind="subscription.canceled",
     )
     return {"ok": True, "canceled_package": pkg_id}
 
@@ -880,6 +866,7 @@ RESPOND WITH STRICT JSON ONLY (no markdown, no code fences):
     "subject": "<concrete subject>",
     "body": "<contextual follow-up, 3-6 sentences>",
     "probability_delta": <int>,
+    "confidence": <int 0-100, your confidence the buyer will engage if we send this>,
     "suggested_action": "<one-line action for the human reviewer>"
   }
 }"""
@@ -905,10 +892,12 @@ class ReplyDraft(BaseModel):
     subject: str
     body: str
     probability_delta: int = 0
+    confidence: int = 70
     suggested_action: str = ""
     sentiment: str
     intent: str
-    status: Literal["pending", "sent", "dismissed"] = "pending"
+    status: Literal["pending", "sent", "dismissed", "auto_sent"] = "pending"
+    auto_sent: bool = False
     created_at: str = Field(default_factory=now_iso)
     sent_at: Optional[str] = None
 
@@ -987,10 +976,27 @@ Generate the buyer reply + Nexus AI's drafted follow-up in strict JSON."""
         subject=str(draft.get("subject", f"Re: {email_doc.get('subject', '')}")),
         body=str(draft.get("body", "")),
         probability_delta=int(draft.get("probability_delta", 0)),
+        confidence=int(draft.get("confidence", 70)),
         suggested_action=str(draft.get("suggested_action", "")),
         sentiment=reply.sentiment,
         intent=reply.intent,
     )
+
+    # Auto-send guard: user settings + Claude confidence + positive sentiment + meaningful delta
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0}) or {}
+    auto_send_enabled = bool(user_doc.get("auto_send_enabled", False))
+    threshold = int(user_doc.get("auto_send_threshold", 85))
+    will_auto_send = (
+        auto_send_enabled
+        and draft_obj.confidence >= threshold
+        and draft_obj.sentiment == "positive"
+        and draft_obj.probability_delta >= 15
+    )
+    if will_auto_send:
+        draft_obj.status = "auto_sent"
+        draft_obj.auto_sent = True
+        draft_obj.sent_at = now_iso()
+
     await db.reply_drafts.insert_one(dict(draft_obj.model_dump()))
 
     # Log activity
@@ -1005,13 +1011,39 @@ Generate the buyer reply + Nexus AI's drafted follow-up in strict JSON."""
     await db.activities.insert_one(dict(act.model_dump()))
     await send_slack(
         db,
-        text=f":speech_balloon: *{company}* replied ({reply.sentiment}/{reply.intent}). Draft ready for review.",
+        text=f":speech_balloon: *{company}* replied ({reply.sentiment}/{reply.intent}). " +
+             ("*Auto-sent* follow-up." if will_auto_send else "Draft ready for review."),
         user_id=user.user_id,
         kind="reply.received",
-        meta={"reply_id": reply.id, "draft_id": draft_obj.id},
+        meta={"reply_id": reply.id, "draft_id": draft_obj.id, "auto_sent": will_auto_send},
     )
 
-    return {"reply": reply.model_dump(), "draft": draft_obj.model_dump()}
+    # If auto-sent: actually fire the email + update deal probability
+    if will_auto_send:
+        await send_email(
+            db,
+            to=reply.from_address,
+            subject=draft_obj.subject,
+            body=draft_obj.body,
+            user_id=user.user_id,
+            kind="reply.followup",
+            meta={"draft_id": draft_obj.id, "in_reply_to": email_id, "auto_sent": True},
+        )
+        if deal_id:
+            deal_doc_pre = await db.deals.find_one({"id": deal_id, "user_id": user.user_id}, {"_id": 0})
+            if deal_doc_pre:
+                new_prob = max(0, min(100, int(deal_doc_pre.get("probability", 0)) + draft_obj.probability_delta))
+                await db.deals.update_one(
+                    {"id": deal_id, "user_id": user.user_id},
+                    {"$set": {
+                        "probability": new_prob,
+                        "agent_status": "closing",
+                        "last_action": f"Auto-replied to buyer (confidence {draft_obj.confidence}%) · prob {deal_doc_pre.get('probability',0)}%→{new_prob}%",
+                        "updated_at": now_iso(),
+                    }},
+                )
+
+    return {"reply": reply.model_dump(), "draft": draft_obj.model_dump(), "auto_sent": will_auto_send}
 
 
 @api_router.get("/replies/queue")
@@ -1103,9 +1135,150 @@ async def dismiss_draft(draft_id: str, user: User = Depends(get_current_user)):
 @api_router.get("/replies/stats")
 async def reply_stats(user: User = Depends(get_current_user)):
     pending = await db.reply_drafts.count_documents({"user_id": user.user_id, "status": "pending"})
-    sent = await db.reply_drafts.count_documents({"user_id": user.user_id, "status": "sent"})
+    sent = await db.reply_drafts.count_documents({"user_id": user.user_id, "status": {"$in": ["sent", "auto_sent"]}})
     received = await db.email_replies.count_documents({"user_id": user.user_id})
-    return {"pending": pending, "sent": sent, "received": received}
+    auto_sent = await db.reply_drafts.count_documents({"user_id": user.user_id, "status": "auto_sent"})
+    return {"pending": pending, "sent": sent, "received": received, "auto_sent": auto_sent}
+
+
+# ---------- User Settings ----------
+class UserSettings(BaseModel):
+    auto_send_enabled: bool = False
+    auto_send_threshold: int = 85  # 50-100
+
+
+@api_router.get("/settings")
+async def get_settings(user: User = Depends(get_current_user)):
+    u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0}) or {}
+    return {
+        "auto_send_enabled": bool(u.get("auto_send_enabled", False)),
+        "auto_send_threshold": int(u.get("auto_send_threshold", 85)),
+    }
+
+
+@api_router.put("/settings")
+async def update_settings(payload: UserSettings, user: User = Depends(get_current_user)):
+    threshold = max(50, min(100, payload.auto_send_threshold))
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {"$set": {
+            "auto_send_enabled": payload.auto_send_enabled,
+            "auto_send_threshold": threshold,
+        }},
+    )
+    return {"auto_send_enabled": payload.auto_send_enabled, "auto_send_threshold": threshold}
+
+
+# ---------- Square Recurring Subscriptions (real, via Web Payments SDK) ----------
+@api_router.get("/payments/config")
+async def payments_config():
+    """Public — frontend needs these to mount Square Web Payments SDK."""
+    return {
+        "application_id": os.environ.get("SQUARE_APPLICATION_ID"),
+        "location_id": os.environ.get("SQUARE_LOCATION_ID"),
+        "environment": os.environ.get("SQUARE_ENVIRONMENT", "sandbox"),
+    }
+
+
+class SubscribePayload(BaseModel):
+    package_id: str
+    source_id: str  # Square Web Payments SDK card-nonce
+    cardholder_name: Optional[str] = None
+
+
+@api_router.post("/payments/subscribe")
+async def create_recurring_subscription(payload: SubscribePayload, user: User = Depends(get_current_user)):
+    if payload.package_id not in sq.PACKAGES:
+        raise HTTPException(400, "Invalid package")
+
+    try:
+        customer_id = await sq.upsert_customer(email=user.email, name=user.name or user.email, user_id=user.user_id)
+        card_id = await sq.create_card_on_file(customer_id=customer_id, source_id=payload.source_id, cardholder=payload.cardholder_name or user.name or user.email)
+        sub = await sq.create_subscription(package_id=payload.package_id, customer_id=customer_id, card_id=card_id)
+    except Exception as e:
+        logging.error(f"Square subscription error: {e}")
+        raise HTTPException(502, f"Square error: {str(e)[:200]}")
+
+    await db.payment_transactions.insert_one({
+        "session_id": sub["id"],
+        "subscription_id": sub["id"],
+        "user_id": user.user_id,
+        "email": user.email,
+        "package_id": payload.package_id,
+        "amount": sq.PACKAGES[payload.package_id]["amount"],
+        "currency": "usd",
+        "payment_status": "paid",
+        "status": "complete",
+        "provider": "square_subscription",
+        "square_customer_id": customer_id,
+        "square_card_id": card_id,
+        "metadata": {"package_id": payload.package_id, "user_id": user.user_id},
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    })
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {"$set": {
+            "subscription_package": payload.package_id,
+            "subscription_active": True,
+            "subscription_id": sub["id"],
+            "square_customer_id": customer_id,
+            "square_card_id": card_id,
+            "subscribed_at": now_iso(),
+            "renews_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+        }},
+    )
+    act = Activity(
+        user_id=user.user_id,
+        agent="Pipeline-Analyst",
+        action="Recurring subscription activated",
+        target=sq.PACKAGES[payload.package_id]["name"],
+        outcome=f"${sq.PACKAGES[payload.package_id]['amount']:,.0f}/mo · Square sub {sub['id']}",
+        status="closing",
+    )
+    await db.activities.insert_one(dict(act.model_dump()))
+    await send_slack(
+        db,
+        text=f":rocket: *{user.email}* started recurring *{sq.PACKAGES[payload.package_id]['name']}* (${sq.PACKAGES[payload.package_id]['amount']:,.0f}/mo)",
+        user_id=user.user_id,
+        kind="subscription.recurring.activated",
+    )
+
+    return {"ok": True, "subscription_id": sub["id"], "status": sub.get("status")}
+
+
+@api_router.post("/payments/subscription/cancel")
+async def cancel_recurring_subscription(user: User = Depends(get_current_user)):
+    u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0}) or {}
+    if not u.get("subscription_active"):
+        raise HTTPException(404, "No active subscription")
+    sub_id = u.get("subscription_id")
+    canceled_remote = None
+    if sub_id:
+        try:
+            canceled_remote = await sq.cancel_subscription(sub_id)
+        except Exception as e:
+            logging.warning(f"Square cancel failed (will still mark locally): {e}")
+    pkg_id = u.get("subscription_package")
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"subscription_active": False, "canceled_at": now_iso()}},
+    )
+    act = Activity(
+        user_id=user.user_id,
+        agent="Pipeline-Analyst",
+        action="Subscription canceled",
+        target=sq.PACKAGES.get(pkg_id or "", {}).get("name", "Plan"),
+        status="idle",
+    )
+    await db.activities.insert_one(dict(act.model_dump()))
+    await send_slack(
+        db,
+        text=f":wave: *{user.email}* canceled *{sq.PACKAGES.get(pkg_id or '', {}).get('name', 'Plan')}* plan",
+        user_id=user.user_id,
+        kind="subscription.canceled",
+    )
+    return {"ok": True, "canceled_package": pkg_id, "square_status": (canceled_remote or {}).get("status")}
 
 
 # ============== SEED DATA ==============

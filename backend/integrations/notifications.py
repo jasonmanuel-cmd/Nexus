@@ -1,15 +1,15 @@
-"""Notification stubs — Resend (email) + Slack (webhook).
+"""Notification senders — Resend (email) + Slack (webhook).
 
-All outbound notifications are persisted to MongoDB and flagged `mocked=true`
-when the respective integration is not configured. Swap MOCKED for LIVE by
-setting RESEND_API_KEY / SLACK_WEBHOOK_URL in /app/backend/.env and
-implementing the actual HTTP calls below.
+Both flip from MOCKED → LIVE automatically when their env keys are present.
+Every send is persisted to MongoDB (`email_outbox` / `slack_outbox`).
 """
 import os
 import uuid
 import logging
 from datetime import datetime, timezone
 from typing import Optional
+
+import httpx
 
 
 def _now_iso() -> str:
@@ -18,13 +18,16 @@ def _now_iso() -> str:
 
 async def send_email(db, *, to: str, subject: str, body: str, user_id: Optional[str] = None,
                     kind: str = "outreach", meta: Optional[dict] = None) -> dict:
-    """Queue an email via Resend (currently MOCKED — persisted to db.email_outbox)."""
+    """Send via Resend if RESEND_API_KEY is configured; otherwise MOCKED to db.email_outbox."""
     resend_key = os.environ.get("RESEND_API_KEY")
+    from_email = os.environ.get("RESEND_FROM_EMAIL", "nexus@example.com")
     mocked = not bool(resend_key)
+
     doc = {
         "id": str(uuid.uuid4()),
         "user_id": user_id,
         "to": to,
+        "from": from_email,
         "subject": subject,
         "body": body,
         "kind": kind,
@@ -33,26 +36,39 @@ async def send_email(db, *, to: str, subject: str, body: str, user_id: Optional[
         "mocked": mocked,
         "provider": "resend" if not mocked else "resend_mock",
         "created_at": _now_iso(),
+        "error": None,
     }
+
     if mocked:
         doc["delivered_at"] = _now_iso()
         doc["status"] = "delivered_mock"
     else:
-        # TODO: real Resend call — left intentionally stubbed
-        # import resend; resend.api_key = resend_key
-        # resend.Emails.send({...})
-        doc["delivered_at"] = _now_iso()
-        doc["status"] = "delivered"
+        try:
+            import resend
+            resend.api_key = resend_key
+            resp = resend.Emails.send({
+                "from": from_email,
+                "to": [to],
+                "subject": subject,
+                "text": body,
+            })
+            doc["provider_id"] = resp.get("id") if isinstance(resp, dict) else getattr(resp, "id", None)
+            doc["delivered_at"] = _now_iso()
+            doc["status"] = "delivered"
+        except Exception as e:
+            doc["status"] = "failed"
+            doc["error"] = str(e)[:200]
+            logging.error(f"[resend FAIL] {to} :: {subject} :: {e}")
 
     await db.email_outbox.insert_one(dict(doc))
-    logging.info(f"[email {'MOCK' if mocked else 'LIVE'}] {to} :: {subject}")
+    logging.info(f"[email {'MOCK' if mocked else doc['status'].upper()}] {to} :: {subject}")
     return doc
 
 
 async def send_slack(db, *, text: str, blocks: Optional[list] = None,
                      user_id: Optional[str] = None, kind: str = "event",
                      meta: Optional[dict] = None) -> dict:
-    """Post to Slack incoming webhook (currently MOCKED — persisted to db.slack_outbox)."""
+    """POST to Slack incoming webhook if SLACK_WEBHOOK_URL is set; otherwise MOCKED."""
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
     mocked = not bool(webhook_url)
     doc = {
@@ -66,16 +82,28 @@ async def send_slack(db, *, text: str, blocks: Optional[list] = None,
         "mocked": mocked,
         "provider": "slack" if not mocked else "slack_mock",
         "created_at": _now_iso(),
+        "error": None,
     }
+
     if mocked:
         doc["delivered_at"] = _now_iso()
         doc["status"] = "delivered_mock"
     else:
-        # TODO: real Slack POST
-        # async with httpx.AsyncClient() as http: await http.post(webhook_url, json={"text": text, "blocks": blocks})
-        doc["delivered_at"] = _now_iso()
-        doc["status"] = "delivered"
+        try:
+            payload = {"text": text}
+            if blocks:
+                payload["blocks"] = blocks
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                r = await http.post(webhook_url, json=payload)
+                if r.status_code >= 400:
+                    raise RuntimeError(f"Slack {r.status_code}: {r.text[:120]}")
+            doc["delivered_at"] = _now_iso()
+            doc["status"] = "delivered"
+        except Exception as e:
+            doc["status"] = "failed"
+            doc["error"] = str(e)[:200]
+            logging.error(f"[slack FAIL] :: {e}")
 
     await db.slack_outbox.insert_one(dict(doc))
-    logging.info(f"[slack {'MOCK' if mocked else 'LIVE'}] {text[:80]}")
+    logging.info(f"[slack {'MOCK' if mocked else doc['status'].upper()}] {text[:80]}")
     return doc

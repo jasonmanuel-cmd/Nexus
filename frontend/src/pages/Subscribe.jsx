@@ -1,13 +1,141 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, fmtUSD } from "../lib/api";
-import { ArrowUpRight, Check, Loader2, Sparkles, ShieldCheck, X, Calendar } from "lucide-react";
+import { ArrowUpRight, Check, Loader2, Sparkles, ShieldCheck, X, Calendar, CreditCard } from "lucide-react";
 import AgentStatus from "../components/AgentStatus";
+
+const SQUARE_SDK_URL_SANDBOX = "https://sandbox.web.squarecdn.com/v1/square.js";
+const SQUARE_SDK_URL_PROD = "https://web.squarecdn.com/v1/square.js";
+
+function loadSquareSdk(env) {
+  return new Promise((resolve, reject) => {
+    if (window.Square) return resolve(window.Square);
+    const url = env === "production" ? SQUARE_SDK_URL_PROD : SQUARE_SDK_URL_SANDBOX;
+    if (document.querySelector(`script[src="${url}"]`)) {
+      const wait = setInterval(() => {
+        if (window.Square) { clearInterval(wait); resolve(window.Square); }
+      }, 80);
+      return;
+    }
+    const s = document.createElement("script");
+    s.src = url;
+    s.onload = () => resolve(window.Square);
+    s.onerror = () => reject(new Error("Square SDK load failed"));
+    document.head.appendChild(s);
+  });
+}
+
+const CardModal = ({ pkg, onClose, onSuccess }) => {
+  const containerRef = useRef(null);
+  const cardRef = useRef(null);
+  const initRef = useRef(false);
+  const [ready, setReady] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+  const [config, setConfig] = useState(null);
+
+  useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
+    (async () => {
+      try {
+        const c = await api.get("/payments/config");
+        setConfig(c.data);
+        const Square = await loadSquareSdk(c.data.environment);
+        const payments = Square.payments(c.data.application_id, c.data.location_id);
+        const card = await payments.card();
+        await card.attach(containerRef.current);
+        cardRef.current = card;
+        setReady(true);
+      } catch (e) {
+        setError(e?.message || "Failed to initialize Square");
+      }
+    })();
+    return () => {
+      try { cardRef.current?.destroy(); } catch {}
+    };
+  }, []);
+
+  const handleSubmit = async () => {
+    if (!cardRef.current) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await cardRef.current.tokenize();
+      if (result.status !== "OK") {
+        const messages = (result.errors || []).map((e) => e.message).join("; ") || "Card validation failed";
+        throw new Error(messages);
+      }
+      const r = await api.post("/payments/subscribe", {
+        package_id: pkg.id,
+        source_id: result.token,
+        cardholder_name: result.details?.card?.cardholderName,
+      });
+      onSuccess(r.data);
+    } catch (e) {
+      setError(e?.response?.data?.detail || e?.message || "Subscription failed");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-6"
+      style={{ background: "rgba(0,0,0,0.75)", backdropFilter: "blur(8px)" }}
+      data-testid="card-modal"
+    >
+      <div className="nx-glass max-w-md w-full p-8 relative">
+        <button
+          onClick={onClose}
+          className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200 transition"
+          data-testid="card-modal-close"
+        >
+          <X size={18} />
+        </button>
+        <div className="nx-label mb-2">[ ACTIVATE SUBSCRIPTION ]</div>
+        <h3 className="font-serif text-3xl mb-1">{pkg.name}</h3>
+        <div className="text-zinc-500 text-sm mb-6">{fmtUSD(pkg.amount)} / month · cancel anytime · Square-secured</div>
+
+        {!ready && !error && (
+          <div className="flex items-center gap-2 text-zinc-500 text-sm py-12 justify-center" data-testid="card-loading">
+            <Loader2 className="animate-spin" size={16} color="var(--nx-cyan)" /> Loading secure card form…
+          </div>
+        )}
+        <div
+          ref={containerRef}
+          id="square-card-container"
+          className="mb-6 min-h-[88px]"
+          style={ready ? {} : { display: "none" }}
+          data-testid="square-card-container"
+        />
+
+        {error && (
+          <div className="mb-4 p-3 text-xs border-l-2 text-zinc-300" style={{ borderColor: "var(--nx-danger)", background: "rgba(255,51,102,0.05)" }} data-testid="card-error">
+            {error}
+          </div>
+        )}
+
+        <button
+          onClick={handleSubmit}
+          disabled={!ready || submitting}
+          className="nx-btn-primary w-full justify-center"
+          data-testid="card-submit-btn"
+        >
+          {submitting ? <><Loader2 className="animate-spin" size={14} /> Processing…</> : <><CreditCard size={14} /> Subscribe — {fmtUSD(pkg.amount)}/mo</>}
+        </button>
+        <div className="text-[10px] text-zinc-600 mt-4 text-center" data-testid="sandbox-card-hint">
+          Sandbox test card: <span className="text-zinc-400 font-mono">4111 1111 1111 1111</span> · any future date · any CVC · ZIP 94103
+        </div>
+      </div>
+    </div>
+  );
+};
 
 export default function Subscribe() {
   const [packages, setPackages] = useState([]);
   const [subscription, setSubscription] = useState(null);
-  const [busy, setBusy] = useState(null);
+  const [modalPkg, setModalPkg] = useState(null);
   const [canceling, setCanceling] = useState(false);
   const navigate = useNavigate();
 
@@ -19,20 +147,6 @@ export default function Subscribe() {
 
   useEffect(() => { fetchAll(); }, []);
 
-  const subscribe = async (pkgId) => {
-    setBusy(pkgId);
-    try {
-      const r = await api.post("/payments/checkout/session", {
-        package_id: pkgId,
-        origin_url: window.location.origin,
-      });
-      window.location.href = r.data.url;
-    } catch (e) {
-      console.error(e);
-      setBusy(null);
-    }
-  };
-
   const cancel = async () => {
     setCanceling(true);
     try {
@@ -41,6 +155,12 @@ export default function Subscribe() {
     } finally {
       setCanceling(false);
     }
+  };
+
+  const handleSubscribeSuccess = async () => {
+    setModalPkg(null);
+    await fetchAll();
+    navigate("/app/dashboard");
   };
 
   const featureMap = {
@@ -55,13 +175,13 @@ export default function Subscribe() {
         <h1 className="font-serif text-4xl lg:text-5xl tracking-tight leading-[1.02]">
           Activate your <span className="italic" style={{ color: "var(--nx-cyan)" }}>autonomous CRO.</span>
         </h1>
-        <p className="text-zinc-400 mt-3">Sandbox-mode Square Checkout · Cancel anytime · SOC 2 secured.</p>
+        <p className="text-zinc-400 mt-3">Real recurring Subscriptions · card never touches our server · cancel anytime.</p>
       </div>
 
       {subscription?.active && (
         <div className="nx-glass p-6 mb-6 flex items-center justify-between flex-wrap gap-4" data-testid="active-subscription-panel" style={{ borderColor: "rgba(0,245,212,0.4)" }}>
           <div className="flex items-center gap-4">
-            <AgentStatus status="closing" label="ACTIVE" />
+            <AgentStatus status="closing" label="ACTIVE · RECURRING" />
             <div>
               <div className="font-serif text-2xl">{subscription.package?.name} plan</div>
               <div className="text-xs text-zinc-500 flex items-center gap-2 mt-1">
@@ -105,13 +225,13 @@ export default function Subscribe() {
                 ))}
               </ul>
               <button
-                onClick={() => subscribe(p.id)}
-                disabled={busy !== null || isCurrent}
+                onClick={() => setModalPkg(p)}
+                disabled={isCurrent}
                 className={featured ? "nx-btn-primary w-full justify-center" : "nx-btn-ghost w-full justify-center"}
                 style={isCurrent ? { opacity: 0.5, cursor: "not-allowed" } : {}}
                 data-testid={`subscribe-btn-${p.id}`}
               >
-                {isCurrent ? <><Check size={14} /> Current plan</> : busy === p.id ? <><Loader2 className="animate-spin" size={14} /> Redirecting…</> : <><Sparkles size={14} /> Subscribe</>}
+                {isCurrent ? <><Check size={14} /> Current plan</> : <><Sparkles size={14} /> Subscribe</>}
               </button>
             </div>
           );
@@ -136,12 +256,16 @@ export default function Subscribe() {
 
       <div className="mt-10 flex items-center justify-between flex-wrap gap-4">
         <div className="nx-label flex items-center gap-3">
-          <ShieldCheck size={14} color="var(--nx-cyan)" /> SOC 2 · GDPR · ISO 27001 · Square-secured · Cancel anytime
+          <ShieldCheck size={14} color="var(--nx-cyan)" /> SOC 2 · GDPR · PCI · Square-secured · Cancel anytime
         </div>
         <button onClick={() => navigate("/app/dashboard")} className="nx-btn-ghost" data-testid="back-to-dashboard">
           Back to dashboard
         </button>
       </div>
+
+      {modalPkg && (
+        <CardModal pkg={modalPkg} onClose={() => setModalPkg(null)} onSuccess={handleSubscribeSuccess} />
+      )}
     </div>
   );
 }

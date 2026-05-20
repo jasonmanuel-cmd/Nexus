@@ -1,6 +1,10 @@
 """Square Sandbox integration wrapper.
 
-The Square Python SDK is synchronous; we use asyncio.to_thread for non-blocking I/O.
+Supports:
+- QuickPay one-time payment links (legacy demo flow)
+- Customer + Card-on-file creation (Web Payments SDK nonce flow)
+- Real recurring Subscriptions via Subscriptions API
+- Webhook HMAC validation
 """
 import asyncio
 import hashlib
@@ -21,13 +25,23 @@ def _client() -> Square:
 
 
 PACKAGES = {
-    "operator": {"amount": 4800.0, "name": "Operator", "description": "3 AI agents · 500 prospects/mo"},
-    "scale":    {"amount": 18500.0, "name": "Scale",   "description": "7 AI agents · Unlimited prospects"},
+    "operator": {
+        "amount": 4800.0,
+        "name": "Operator",
+        "description": "3 AI agents · 500 prospects/mo",
+        "plan_variation_env": "SQUARE_OPERATOR_PLAN_VARIATION_ID",
+    },
+    "scale": {
+        "amount": 18500.0,
+        "name": "Scale",
+        "description": "7 AI agents · Unlimited prospects",
+        "plan_variation_env": "SQUARE_SCALE_PLAN_VARIATION_ID",
+    },
 }
 
 
+# ---------------- QuickPay link (legacy demo) ----------------
 def _create_quick_pay_link_sync(package_id: str, redirect_url: str, user_id: str, email: str) -> dict:
-    """Create a Square hosted payment link (QuickPay) for the first month of a subscription."""
     pkg = PACKAGES[package_id]
     location_id = os.environ["SQUARE_LOCATION_ID"]
     c = _client()
@@ -38,60 +52,131 @@ def _create_quick_pay_link_sync(package_id: str, redirect_url: str, user_id: str
             "price_money": {"amount": int(pkg["amount"] * 100), "currency": "USD"},
             "location_id": location_id,
         },
-        checkout_options={
-            "redirect_url": redirect_url,
-            "ask_for_shipping_address": False,
-        },
+        checkout_options={"redirect_url": redirect_url, "ask_for_shipping_address": False},
         pre_populated_data={"buyer_email": email},
         description=f"Nexus AI {pkg['name']} subscription · user={user_id}",
     )
     pl = resp.payment_link
-    return {
-        "id": pl.id,
-        "url": pl.url,
-        "order_id": getattr(pl, "order_id", None),
-        "long_url": getattr(pl, "long_url", None),
-    }
+    return {"id": pl.id, "url": pl.url, "order_id": getattr(pl, "order_id", None)}
 
 
 async def create_payment_link(package_id: str, redirect_url: str, user_id: str, email: str) -> dict:
     return await asyncio.to_thread(_create_quick_pay_link_sync, package_id, redirect_url, user_id, email)
 
 
-def _get_payment_link_sync(link_id: str) -> dict:
-    c = _client()
-    resp = c.checkout.payment_links.get(id=link_id)
-    pl = resp.payment_link
-    order_id = getattr(pl, "order_id", None)
-    return {
-        "id": pl.id,
-        "url": pl.url,
-        "order_id": order_id,
-    }
-
-
-async def get_payment_link(link_id: str) -> dict:
-    return await asyncio.to_thread(_get_payment_link_sync, link_id)
-
-
 def _get_order_sync(order_id: str) -> dict:
     c = _client()
     resp = c.orders.get(order_id=order_id)
     o = resp.order
-    return {
-        "id": o.id,
-        "state": getattr(o, "state", None),
-        "total_money": getattr(o.total_money, "amount", None) if getattr(o, "total_money", None) else None,
-        "tenders": [t.dict() if hasattr(t, "dict") else dict(t.__dict__) for t in (getattr(o, "tenders", None) or [])],
-    }
+    return {"id": o.id, "state": getattr(o, "state", None)}
 
 
 async def get_order(order_id: str) -> dict:
     return await asyncio.to_thread(_get_order_sync, order_id)
 
 
+# ---------------- Customer + Card-on-file ----------------
+def _upsert_customer_sync(email: str, name: str, user_id: str) -> str:
+    c = _client()
+    # Search for existing
+    try:
+        search = c.customers.search(query={"filter": {"email_address": {"exact": email}}})
+        customers = getattr(search, "customers", None) or []
+        if customers:
+            return customers[0].id
+    except Exception:
+        pass
+    parts = (name or "").split(" ", 1)
+    given = parts[0] if parts else ""
+    family = parts[1] if len(parts) > 1 else ""
+    resp = c.customers.create(
+        idempotency_key=str(uuid.uuid4()),
+        given_name=given or "Nexus",
+        family_name=family or "User",
+        email_address=email,
+        reference_id=user_id,
+    )
+    return resp.customer.id
+
+
+async def upsert_customer(email: str, name: str, user_id: str) -> str:
+    return await asyncio.to_thread(_upsert_customer_sync, email, name, user_id)
+
+
+def _create_card_sync(customer_id: str, source_id: str, cardholder: str) -> str:
+    """Create a card on file from a Web Payments SDK nonce (source_id)."""
+    c = _client()
+    resp = c.cards.create(
+        idempotency_key=str(uuid.uuid4()),
+        source_id=source_id,
+        card={"customer_id": customer_id, "cardholder_name": cardholder or "Nexus User"},
+    )
+    return resp.card.id
+
+
+async def create_card_on_file(customer_id: str, source_id: str, cardholder: str) -> str:
+    return await asyncio.to_thread(_create_card_sync, customer_id, source_id, cardholder)
+
+
+# ---------------- Subscriptions ----------------
+def _create_subscription_sync(package_id: str, customer_id: str, card_id: str) -> dict:
+    c = _client()
+    location_id = os.environ["SQUARE_LOCATION_ID"]
+    plan_variation_id = os.environ.get(PACKAGES[package_id]["plan_variation_env"])
+    if not plan_variation_id:
+        raise RuntimeError(f"Missing plan variation env for {package_id}")
+    resp = c.subscriptions.create(
+        idempotency_key=str(uuid.uuid4()),
+        location_id=location_id,
+        plan_variation_id=plan_variation_id,
+        customer_id=customer_id,
+        card_id=card_id,
+    )
+    s = resp.subscription
+    return {
+        "id": s.id,
+        "status": getattr(s, "status", None),
+        "created_at": getattr(s, "created_at", None),
+        "plan_variation_id": getattr(s, "plan_variation_id", plan_variation_id),
+        "card_id": getattr(s, "card_id", card_id),
+        "customer_id": getattr(s, "customer_id", customer_id),
+    }
+
+
+async def create_subscription(package_id: str, customer_id: str, card_id: str) -> dict:
+    return await asyncio.to_thread(_create_subscription_sync, package_id, customer_id, card_id)
+
+
+def _cancel_subscription_sync(subscription_id: str) -> dict:
+    c = _client()
+    resp = c.subscriptions.cancel(subscription_id=subscription_id)
+    s = resp.subscription
+    return {"id": s.id, "status": getattr(s, "status", None), "canceled_date": getattr(s, "canceled_date", None)}
+
+
+async def cancel_subscription(subscription_id: str) -> dict:
+    return await asyncio.to_thread(_cancel_subscription_sync, subscription_id)
+
+
+def _get_subscription_sync(subscription_id: str) -> dict:
+    c = _client()
+    resp = c.subscriptions.get(subscription_id=subscription_id)
+    s = resp.subscription
+    return {
+        "id": s.id,
+        "status": getattr(s, "status", None),
+        "plan_variation_id": getattr(s, "plan_variation_id", None),
+        "card_id": getattr(s, "card_id", None),
+        "canceled_date": getattr(s, "canceled_date", None),
+    }
+
+
+async def get_subscription(subscription_id: str) -> dict:
+    return await asyncio.to_thread(_get_subscription_sync, subscription_id)
+
+
+# ---------------- Webhook validation ----------------
 def validate_webhook(raw_body: bytes, signature: str) -> bool:
-    """Validate Square webhook HMAC-SHA256 signature."""
     if not signature:
         return False
     key = os.environ.get("SQUARE_WEBHOOK_SIGNATURE_KEY", "").encode("utf-8")
