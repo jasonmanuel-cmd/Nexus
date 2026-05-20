@@ -532,7 +532,7 @@ async def dashboard_metrics(user: User = Depends(get_current_user)):
 
 
 @api_router.get("/dashboard/activity")
-async def dashboard_activity(limit: int = 25, user: User = Depends(get_current_user)):
+async def dashboard_activity(limit: int = 100, user: User = Depends(get_current_user)):
     docs = await db.activities.find({"user_id": user.user_id}, {"_id": 0}).sort("timestamp", -1).to_list(limit)
     return {"activities": docs}
 
