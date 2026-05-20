@@ -1,62 +1,71 @@
 # Nexus AI — Autonomous CRO · PRD
 
 ## Original Problem Statement
-Build 'Nexus AI' — the first autonomous AI Chief Revenue Officer for mid-market companies. 5 core features: Landing, Command Center Dashboard, Autonomous Lead Engine, Pipeline Automation, Beta Onboarding with AI-generated targets. Goal: $1M/month-feel prototype.
+Build 'Nexus AI' — first autonomous AI Chief Revenue Officer for mid-market companies. 5 core features: Landing, Command Center Dashboard, Autonomous Lead Engine, Pipeline Automation, Beta Onboarding with AI-generated targets. Goal: $1M/month-feel prototype.
 
 ## Architecture
-- **Frontend**: React 19 + React Router 7 + Tailwind + Framer Motion + Recharts
-- **Backend**: FastAPI (lifespan) + Motor + emergentintegrations + squareup
+- **Frontend**: React 19 + React Router 7 + Tailwind + Framer Motion + Recharts + Square Web Payments SDK
+- **Backend**: FastAPI (lifespan, partial router split) + Motor + emergentintegrations + squareup + resend + httpx
 - **AI**: Claude Sonnet 4.5 via Emergent Universal LLM Key
-- **Payments**: Square Sandbox QuickPay
+- **Payments**: **Square Sandbox recurring Subscriptions** (real Subscriptions API + card-on-file via Web Payments SDK tokenization)
 - **Auth**: Emergent-managed Google Auth (cookie + Bearer)
-- **Notifications**: Resend + Slack — MOCKED until env keys set
-- **DB collections**: users, user_sessions, profiles, targets, deals, signals, activities, payment_transactions, email_outbox, slack_outbox, **email_replies, reply_drafts**
+- **Notifications**: **Resend LIVE** + **Slack LIVE** (Resend currently `status:failed` until user verifies coaibakersfield.com DNS)
+- **DB**: users, user_sessions, profiles, targets, deals, signals, activities, payment_transactions, email_outbox, slack_outbox, email_replies, reply_drafts
 
-## Versions Shipped
-| v | Iter | Feature delta | Result |
+## Version Map
+| v | Iter | Delta | Tests |
 |---|---|---|---|
-| 1.0 | 1 | Landing + Dashboard + Lead Engine + Pipeline + Onboarding + Claude target gen + MongoDB | 15/15 PASS |
-| 2.0 | 2-3 | Google Auth + multi-tenant + Recharts + DnD kanban + Promote-target + Stripe | 14/14 PASS |
-| 3.0 | 4 | Square (replaces Stripe) + Resend/Slack MOCKED stubs + Outbox page + FastAPI lifespan + integrations/ module | 29/29 PASS |
-| 4.0 | 5 | **Autonomous Reply Loop** — Claude buyer-reply simulation + AI-drafted contextual follow-up + human-in-the-loop Replies Queue + send/edit/dismiss + auto deal-probability adjustment | **10/10 PASS** |
+| 1.0 | 1 | Landing + Dashboard + Lead Engine + Pipeline + Onboarding + Claude target gen | 15/15 |
+| 2.0 | 2-3 | Auth + multi-tenant + Recharts + DnD kanban + Promote-target + Stripe | 14/14 |
+| 3.0 | 4 | Square (replaced Stripe) + MOCKED Resend/Slack + Outbox + lifespan + integrations/ module | 29/29 |
+| 4.0 | 5 | Autonomous Reply Loop (Claude buyer-reply + AI-drafted follow-up + Replies Queue) | 10/10 |
+| **5.0** | **6** | **Confidence-slider auto-send + LIVE Resend + LIVE Slack + real recurring Square subscriptions (Web Payments SDK) + partial router split** | **14/14 (+1 env-skipped)** |
 
-## v4.0 Details (Feb 20, 2026 — Iteration 5)
-- `POST /api/notifications/email/{id}/simulate-reply` → Claude generates a realistic buyer reply (varied sentiment) + a contextual follow-up draft in a single LLM call
-- `GET /api/replies/queue` — enriched pending drafts (joins reply + original outreach + deal)
-- `POST /api/replies/{id}/send` — send as-is or with edits; bumps deal probability by `probability_delta` (clamped 0-100); sets `agent_status=closing` on positive sentiment; logs activity + sends queued follow-up to email_outbox
-- `DELETE /api/replies/{id}` — dismiss
-- `GET /api/replies/stats` — counters
-- New page `/app/replies` — two-column conversation view (your outreach + buyer reply on left, AI draft on right) with Edit/Send-as-is/Dismiss
-- Outbox `Simulate buyer reply` button on every `promote.intro` / `reply.followup` email
+## v5.0 Details (Feb 20, 2026 — Iteration 6)
+- **`/api/settings`** GET/PUT — `auto_send_enabled` + `auto_send_threshold` (50-100, clamped)
+- **Auto-send loop** in `simulate_reply`: when `auto_send_enabled` + `sentiment=positive` + `probability_delta ≥ 15` + `confidence ≥ threshold` → draft.status flips to `auto_sent`, follow-up queues immediately, deal probability bumps, `agent_status=closing`, Slack pings "Auto-sent follow-up"
+- **`/api/payments/config`** public — exposes Square `application_id` + `location_id` + `environment` for browser SDK
+- **`/api/payments/subscribe`** — full path: upsert Square Customer → create Card from Web Payments SDK nonce → create real Square Subscription → mark `subscription_active` + store `square_customer_id` + `square_card_id` + `subscription_id` + `renews_at`
+- **`/api/payments/subscription/cancel`** — calls Square `Subscriptions.cancel`, fail-soft if Square errors
+- **LIVE Resend** — `integrations/notifications.py` uses Resend SDK when `RESEND_API_KEY` set; writes provider/status/error to `email_outbox`
+- **LIVE Slack** — httpx POST to `SLACK_WEBHOOK_URL`; confirmed delivering to user's workspace
+- **New `/app/settings`** page — slider + toggle + live counters (auto-sent / manual approvals / awaiting you)
+- **Square card modal** — Web Payments SDK loaded from `sandbox.web.squarecdn.com`; `initRef` guard prevents React 18 StrictMode double-mount
+- **Partial router split** — `deps.py` (shared db/User/get_current_user/Activity) + `routers/settings.py` extracted; remaining routers staged for next iter
 
 ## Personas
-- Mid-market CRO / VP Sales (primary buyer)
-- RevOps Lead (champion / operator)
-- Founder of $5M–$100M ARR company
+- Mid-market CRO / VP Sales (buyer)
+- RevOps Lead (champion)
+- Founder $5M–$100M ARR (decision maker)
+
+## Known Configurations / Operational Notes
+- `RESEND_FROM_EMAIL=nexus@coaibakersfield.com` — user must verify domain DNS at https://resend.com/domains for emails to actually deliver (currently `status:failed` correctly)
+- Square test card for sandbox: `4111 1111 1111 1111` · any future date · any CVC · ZIP 94103
+- Square `OPERATOR_PLAN_VARIATION_ID=gExEqBXlbrGl5zlMM01fQQ` and `SCALE_PLAN_VARIATION_ID=-u9ZoOWQan3VLZeToy0mzg` — if these are not actual `SUBSCRIPTION_PLAN_VARIATION` catalog objects, subscribe may 502 (user to confirm in Square Dashboard → Subscriptions)
 
 ## Prioritized Backlog
 ### P1
-- **Flip Resend live** (drop API key + verified sender in `.env`, uncomment POST in `integrations/notifications.py`)
-- **Flip Slack live** (drop webhook URL, uncomment POST)
-- Real Square Subscriptions (Subscriptions API + card-on-file) — currently QuickPay first-month only
+- Verify Resend domain on resend.com (5 min, user-side)
+- Confirm Square subscription plan variation IDs (user to confirm in Dashboard)
+- Sanitize Square error text leaking to client in `/payments/subscribe` 502 path
 
 ### P2
-- Split `server.py` (1170 lines) into routers (auth / payments / dashboard / leads / pipeline / onboarding / targets / notifications / replies)
-- Stripe Customer Portal equivalent (manage card, view invoices)
-- Recharts Sankey for pipeline flow
-- Mobile-optimized kanban
-- Multi-card-select drag-drop
+- Finish router split — extract `payments.py`, `notifications.py`, `replies.py`, `onboarding.py`, `dashboard.py`, `pipeline.py`, `leads.py`, `auth.py`
+- Square Customer Portal equivalent (manage card, view invoices)
+- Recharts Sankey pipeline visualization
+- Mobile-optimized kanban + multi-card select
+- Add `data-testid="settings-saved-badge"` for deterministic save assertions
 
 ### P3
-- Custom agent configuration UI
+- Custom agent config UI
 - Audit log of agent decisions
 - Light theme toggle
-- Internationalization
-- Outbox: filter by kind, search, mark-as-read
+- I18n
+- Outbox filters/search
 
 ## Next Tasks
-1. Flip Resend live (5 min)
-2. Flip Slack live (5 min)
-3. Real Square recurring Subscriptions
-4. Router split of server.py
-5. Recharts Sankey pipeline visualization
+1. User: verify `coaibakersfield.com` DNS on Resend
+2. User: confirm Square subscription plan variation IDs
+3. Finish router split (payments, replies, notifications first)
+4. Sanitize Square error responses
+5. Recharts Sankey for pipeline flow

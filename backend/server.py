@@ -1141,34 +1141,6 @@ async def reply_stats(user: User = Depends(get_current_user)):
     return {"pending": pending, "sent": sent, "received": received, "auto_sent": auto_sent}
 
 
-# ---------- User Settings ----------
-class UserSettings(BaseModel):
-    auto_send_enabled: bool = False
-    auto_send_threshold: int = 85  # 50-100
-
-
-@api_router.get("/settings")
-async def get_settings(user: User = Depends(get_current_user)):
-    u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0}) or {}
-    return {
-        "auto_send_enabled": bool(u.get("auto_send_enabled", False)),
-        "auto_send_threshold": int(u.get("auto_send_threshold", 85)),
-    }
-
-
-@api_router.put("/settings")
-async def update_settings(payload: UserSettings, user: User = Depends(get_current_user)):
-    threshold = max(50, min(100, payload.auto_send_threshold))
-    await db.users.update_one(
-        {"user_id": user.user_id},
-        {"$set": {
-            "auto_send_enabled": payload.auto_send_enabled,
-            "auto_send_threshold": threshold,
-        }},
-    )
-    return {"auto_send_enabled": payload.auto_send_enabled, "auto_send_threshold": threshold}
-
-
 # ---------- Square Recurring Subscriptions (real, via Web Payments SDK) ----------
 @api_router.get("/payments/config")
 async def payments_config():
@@ -1328,6 +1300,10 @@ SAMPLE_ACTIVITIES = [
 
 
 app.include_router(api_router)
+
+# Modular routers (extracted from server.py for maintainability)
+from routers.settings import router as settings_router
+app.include_router(settings_router)
 
 app.add_middleware(
     CORSMiddleware,
