@@ -1,0 +1,143 @@
+{
+  "theme": "dark",
+  "archetype": "Swiss & High-Contrast mixed with Electric & Neon (Tactical Bloomberg Terminal)",
+  "color_palette": {
+    "background": "#050505",
+    "surface": "#121214",
+    "surface_glass": "rgba(10, 10, 11, 0.4)",
+    "border": "rgba(255, 255, 255, 0.08)",
+    "primary": "#00F5D4",
+    "secondary": "#FF5500",
+    "text_primary": "#FAFAFA",
+    "text_secondary": "#A1A1AA",
+    "success": "#00F5D4",
+    "warning": "#FF5500",
+    "danger": "#FF3366"
+  },
+  "typography": {
+    "fonts": [
+      {
+        "name": "Instrument Serif",
+        "type": "heading",
+        "usage": "Marketing Headings (H1, H2) for that $1M/month premium feel."
+      },
+      {
+        "name": "Geist Mono",
+        "type": "body_and_dashboard",
+        "usage": "Body text, dashboard metrics, UI elements, data grids (Bloomberg terminal precision)."
+      }
+    ],
+    "rules": {
+      "h1": "text-5xl sm:text-6xl+ font-serif tracking-tight leading-none",
+      "h2": "text-4xl sm:text-5xl font-serif tracking-tight",
+      "h3_dashboard": "text-xl sm:text-2xl font-mono uppercase tracking-[0.1em]",
+      "body": "text-sm sm:text-base font-mono leading-relaxed text-zinc-400"
+    }
+  },
+  "layout_and_spacing": {
+    "marketing_page": "Mode A: Tetris Grid. grid-cols-1 md:grid-cols-12 gap-8. Asymmetric bento grid for Hero.",
+    "dashboard": "Mode B: Control Room Grid. grid-cols-1 md:grid-cols-4 lg:grid-cols-6 gap-4. Dense, 1px borders, tight padding.",
+    "container_padding": "p-6 or p-8 for glassmorphic containers.",
+    "effects": {
+      "glassmorphism": "bg-[#0A0A0B]/60 backdrop-blur-xl border border-white/10",
+      "noise": "fixed inset-0 pointer-events-none opacity-[0.03] mix-blend-screen bg-[url('data:image/svg+xml;utf8,%3Csvg viewBox=%220 0 200 200%22 xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cfilter id=%22noiseFilter%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.65%22 numOctaves=%223%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22100%25%22 height=%22100%25%22 filter=%22url(%23noiseFilter)%22/%3E%3C/svg%3E')]",
+      "glow": "Subtle box-shadow drop-shadow-[0_0_15px_rgba(0,245,212,0.15)] for active elements."
+    }
+  },
+  "components_and_features": {
+    "landing_page": {
+      "description": "High-converting, enterprise-grade aesthetic with dark mode and sleek bento-grid layouts.",
+      "sections": [
+        "Hero: Bento grid overlapping panels. Left side: Value prop (Instrument Serif). Right side: Animated 'AI thinking' mock.",
+        "Feature Showcase: Asymmetrical grid highlighting Autonomous Lead Engine, Pipeline, etc.",
+        "Social Proof: High-end company logos on dark background.",
+        "Pricing: 3 tiers, enterprise tier highlighted with Tracing Beam border.",
+        "CTA: Large section leading to Beta Onboarding."
+      ]
+    },
+    "command_center_dashboard": {
+      "description": "Live 'Command Center' visualizing AI-driven revenue activities.",
+      "layout": "Dense 4-column grid. Left rail navigation. Top row: Key Metrics with Animated Number Tickers. Main: Live AI Activity Feed.",
+      "agent_status_indicators": {
+        "idle": "Gray dot with slow 4s pulse.",
+        "scanning": "Cyan dot with radar scanning sweep (Framer Motion).",
+        "thinking": "Amber glow with rapid breathing opacity.",
+        "closing": "Rapid cyan/white alternating pulse."
+      }
+    },
+    "autonomous_lead_engine": {
+      "description": "Web-scanning simulation for high-intent signals.",
+      "visuals": "Dark table/list with 'Scanning Beams' (moving linear gradients) indicating live processing. Lead score visualizations (progress bars in Cyan/Amber)."
+    },
+    "pipeline_automation": {
+      "description": "Visual kanban board showing AI-managed deals.",
+      "visuals": "Glassmorphic columns, tight gaps. Cards have 1px borders. Highlight deals actively being 'worked on' by AI with a pulsing border."
+    },
+    "beta_onboarding": {
+      "description": "Interactive section to onboard and see AI generate targets.",
+      "flow": "Multi-step terminal-like form -> 'AI processing' screen with simulated terminal logs -> Reveals 10 high-value target cards."
+    }
+  },
+  "image_urls": [
+    {
+      "url": "https://images.unsplash.com/photo-1772862991841-f0e3e1502d7b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMGRhcmslMjB0ZWNobm9sb2d5JTIwbmV0d29yayUyMG5vZGVzfGVufDB8fHx8MTc3OTI2ODM0NXww&ixlib=rb-4.1.0&q=85",
+      "category": "hero_background",
+      "description": "Abstract bokeh lights with fiber optics for landing page background or dashboard accent"
+    },
+    {
+      "url": "https://images.pexels.com/photos/30766684/pexels-photo-30766684.png?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "category": "ai_thinking_texture",
+      "description": "3D abstract geometric structure with gold lines and black polygons for the Beta Onboarding processing state"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1761044590687-29916cbe4203?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjV8MHwxfHNlYXJjaHw0fHxjb21wYW55JTIwbG9nbyUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3OTI2ODA0MHww&ixlib=rb-4.1.0&q=85",
+      "category": "sponsor_logo",
+      "description": "Company Logo 1"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1772760110621-d7b6f54c1e42?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjV8MHwxfHNlYXJjaHwyfHxjb21wYW55JTIwbG9nbyUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3OTI2ODA0MHww&ixlib=rb-4.1.0&q=85",
+      "category": "sponsor_logo",
+      "description": "Company Logo 2"
+    },
+    {
+      "url": "https://images.pexels.com/photos/18203253/pexels-photo-18203253.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "category": "sponsor_logo",
+      "description": "Company Logo 3"
+    },
+    {
+      "url": "https://images.pexels.com/photos/9949424/pexels-photo-9949424.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "category": "sponsor_logo",
+      "description": "Company Logo 4"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1590664177914-9da6d6e8f0f6?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjV8MHwxfHNlYXJjaHwxfHxjb21wYW55JTIwbG9nbyUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3OTI2ODA0MHww&ixlib=rb-4.1.0&q=85",
+      "category": "sponsor_logo",
+      "description": "Company Logo 5"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1600896997793-b8ed3459a17f?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHw0fHxwcm9mZXNzaW9uYWwlMjBjb3Jwb3JhdGUlMjBoZWFkc2hvdCUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3OTI2ODA0MHww&ixlib=rb-4.1.0&q=85",
+      "category": "avatar",
+      "description": "Professional Headshot 1"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1767175620484-1ed37931a0d1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjBjb3Jwb3JhdGUlMjBoZWFkc2hvdCUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3OTI2ODA0MHww&ixlib=rb-4.1.0&q=85",
+      "category": "avatar",
+      "description": "Professional Headshot 2"
+    },
+    {
+      "url": "https://images.pexels.com/photos/10657877/pexels-photo-10657877.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "category": "avatar",
+      "description": "Professional Headshot 3"
+    }
+  ],
+  "instructions_to_main_agent": {
+    "testing_attributes": "All interactive/informational elements MUST have a data-testid attribute in kebab-case (e.g. data-testid='login-button').",
+    "motion": "Use Framer Motion for micro-interactions: hover states, agent status pulsing dots, scanning sweeps, and animated number tickers.",
+    "icons": "Use Phosphor Icons or Lucide-React for techy, precise UI iconography.",
+    "fonts": "Import Geist Mono and Instrument Serif via Google Fonts or standard imports. Do NOT use Inter or standard sans-serif.",
+    "glassmorphism": "Ensure heavy use of backdrop-blur-xl (16-24px) combined with bg-black/40 and 1px white/10 border.",
+    "noise": "Add a global fixed noise div overlay using the provided SVG filter snippet to give the cinematic, expensive $1M/mo feel.",
+    "tech_stack": "React, TailwindCSS, Framer Motion, Shadcn (customized to remove generic styling).",
+    "theme_setup": "Force dark mode. Remove light mode toggle."
+  }
+}
