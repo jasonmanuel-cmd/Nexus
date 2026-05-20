@@ -103,8 +103,8 @@ export default function Dashboard() {
             </div>
             <AgentStatus status="thinking" />
           </div>
-          <div className="h-[260px]">
-            <ResponsiveContainer>
+          <div className="h-[260px] w-full min-h-[260px]">
+            <ResponsiveContainer width="100%" height="100%">
               <BarChart data={charts.waterfall} margin={{ top: 10, right: 10, left: 0, bottom: 10 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
                 <XAxis dataKey="stage" tick={{ fill: "#a1a1aa", fontSize: 10, fontFamily: "Geist Mono" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} />
@@ -125,8 +125,8 @@ export default function Dashboard() {
             </div>
             <AgentStatus status="scanning" />
           </div>
-          <div className="h-[260px]">
-            <ResponsiveContainer>
+          <div className="h-[260px] w-full min-h-[260px]">
+            <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={charts.productivity} margin={{ top: 10, right: 5, left: 0, bottom: 10 }}>
                 <defs>
                   <linearGradient id="cyanGrad" x1="0" y1="0" x2="0" y2="1">
