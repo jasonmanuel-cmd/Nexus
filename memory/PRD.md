@@ -1,58 +1,59 @@
-# Nexus AI — Autonomous Chief Revenue Officer
+# Nexus AI — Autonomous CRO · PRD
 
 ## Original Problem Statement
 Build 'Nexus AI' — the first autonomous AI Chief Revenue Officer for mid-market companies.
-Core features: Premium Landing Page, live Command Center Dashboard, Autonomous Lead Engine (web-scanning sim), Pipeline Automation (kanban), Beta Interactive Onboarding (AI generates 10 high-value targets). Looks/feels like a $1M/month enterprise product. 2026 design trends (glassmorphism, micro-interactions, AI-agent status indicators).
 
-## Locked-In Choices
-- LLM: **Claude Sonnet 4.5** (`claude-sonnet-4-5-20250929`) via Emergent Universal LLM Key + `emergentintegrations` library
-- Theme: **Deep obsidian black** + **electric cyan/teal** + secondary amber/orange accents
-- Auth: **None** (open prototype)
-- Persistence: **MongoDB** (motor async driver)
-- Fonts: **Instrument Serif** (headings) + **Geist Mono** (body / dashboard)
+Core features:
+1. Premium Landing Page — High-converting, enterprise-grade dark-mode bento grid.
+2. Dashboard — Live 'Command Center' visualizing AI-driven revenue activities.
+3. Autonomous Lead Engine — Simulates web-scanning for high-intent signals.
+4. Pipeline Automation — Visual kanban of AI-managed deals across stages.
+5. 'Beta' Interactive Onboarding — User onboards their company → AI generates first 10 high-value targets.
+
+Goal: prototype that feels like a $1M/month product. 2026 design trends (glassmorphism, micro-interactions, AI-agent status indicators).
 
 ## Architecture
-- **Backend**: FastAPI on `:8001`, all routes prefixed `/api`. MongoDB via `MONGO_URL`. Seeds 12 signals, 11 deals, 12 activities at startup if empty.
-- **Frontend**: React 19 + React Router 7 + Tailwind + Framer Motion + shadcn/ui primitives.
-- Routes: `/` landing, `/app/dashboard`, `/app/lead-engine`, `/app/pipeline`, `/app/onboarding`.
+- **Frontend**: React 19 + React Router 7 + Tailwind + Framer Motion + custom glass/bento panels
+- **Backend**: FastAPI + Motor (async Mongo)
+- **DB**: MongoDB (collections: profiles, targets, deals, signals, activities)
+- **AI**: Claude Sonnet 4.5 (`claude-sonnet-4-5-20250929`) via emergentintegrations + Emergent Universal LLM Key
+- **Theme**: Obsidian black (#050505) + Electric Teal (#00F5D4) + Signal Orange (#FF5500), Instrument Serif + Geist Mono, dark-only, glassmorphic panels, noise overlay, scanning beams
 
-## User Personas
-1. **CRO at $50M ARR SaaS** — wants pipeline visibility + autonomous outreach to replace 6-12 SDRs.
-2. **CEO at Series B startup** — needs revenue compounding without scaling headcount.
-3. **VP RevOps** — wants signal-based ICP refinement.
+## Personas
+- Mid-market CRO / VP Sales (primary buyer)
+- RevOps Lead (champion / operator)
+- Founder of $5M–$100M ARR company (decision maker)
 
-## Core Requirements (Static)
-- Premium dark landing with bento hero, social proof marquee, feature grid, 7-agent panel, 3-tier pricing, final CTA.
-- Live Command Center with animated tickers, agent fleet load bars, real-time activity feed (8s poll).
-- Lead Engine table with intent signals, signal-strength bars, "Trigger live scan" CTA.
-- Pipeline kanban with 5 stages, AI-status-tagged cards, chevron-based stage progression.
-- 4-step onboarding wizard → LLM call → terminal-style processing → 10 target cards.
+## What's Been Implemented — v1.0 (Feb 20, 2026)
+- **Landing**: Fixed glass nav · Bento hero (headline + live agent feed + 4 stat tiles) · Sponsor marquee · Feature bento (4 asymmetric panels) · 7-agent fleet · Pricing (Operator / Scale-featured / Enterprise) · Final CTA · Footer
+- **App shell**: Sidebar nav, agents-online indicator, back-to-site
+- **Dashboard (Command Center)**: 6 animated number-ticker metrics, live agent activity feed (auto-refresh 8s), agent fleet load bars, Q1 forecast panel
+- **Lead Engine**: Scan-status panel with progress + beam, total-signals tile, signal table with strength bars, "Trigger live scan" adds 3-5 new signals
+- **Pipeline**: 5-column kanban, advance/regress via chevron, closing deals get pulsing cyan border + scan beam
+- **Beta Onboarding**: 4-step wizard → terminal-style AI processing stream → 10 target cards from real Claude Sonnet 4.5 with fit score, decision maker, intent signal, recommended play
+- **Persistence**: All profiles, targets, deals, signals, activities persisted in MongoDB; auto-seed on first startup
+- **All interactive elements** have `data-testid` attributes
 
-## What's Implemented (May 20, 2026)
-- ✅ Landing page with all sections
-- ✅ App shell with persistent sidebar
-- ✅ Command Center dashboard (live metrics, agent fleet, activity feed)
-- ✅ Autonomous Lead Engine (signals table, scan trigger, scanning beam)
-- ✅ Pipeline Kanban (drag-less via chevrons; PATCH to backend)
-- ✅ Beta Onboarding wizard + real Claude Sonnet 4.5 target generation
-- ✅ MongoDB persistence for profiles, targets, deals, signals, activities
-- ✅ Seed data on startup
-- ✅ Backend tests: **15/15 passing** (includes 32s real LLM E2E test)
-
-## API Surface
-- `GET /api/` health
-- `GET /api/dashboard/metrics`, `GET /api/dashboard/activity`
-- `GET /api/leads/signals`, `POST /api/leads/scan`
-- `GET/POST/PATCH /api/pipeline/deals`
-- `POST /api/onboarding`, `GET /api/onboarding/latest`, `GET /api/onboarding/{id}`
-- `POST /api/targets/generate`, `GET /api/targets`
+## Testing — Iteration 1 (PASS)
+- Backend: 15/15 pytest passing (incl. real Claude Sonnet 4.5 generation)
+- Frontend: All critical flows verified by testing agent (no console errors, no _id leaks)
 
 ## Prioritized Backlog
-**P0** — None outstanding.
-**P1** — Add Stripe billing for paid tiers; export targets as CSV.
-**P2** — Real-time WebSocket activity stream; drag-and-drop pipeline; email-send integration (Resend/SendGrid); CRM connectors (HubSpot/Salesforce); team multi-user.
-**P3** — Voice agent for call summaries; Slack notifications; forecast accuracy backtest.
+### P1
+- Promote a target → pipeline deal (one-click)
+- Persist scan-engine signals tied to a profile
+- Multi-tenant scoping when auth is added
+### P2
+- Drag-and-drop kanban (currently chevron-based)
+- Recharts revenue waterfall + agent productivity on dashboard
+- Stripe billing for self-serve tier
+- Email/calendar integration mocks
+### P3
+- Custom agent configuration UI
+- Slack / Webhook outbound integration
+- Optional light theme toggle
 
 ## Next Tasks
-- User review of MVP
-- Optional: real outbound (Resend), Stripe pricing tier checkout, target export
+1. "Promote to pipeline" button on target card
+2. Stripe self-serve subscription on onboarding
+3. Recharts revenue waterfall on dashboard
