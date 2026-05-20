@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowUpRight, Cpu, Radar, GitBranch, Rocket, Zap, Brain, ShieldCheck, Activity, Sparkles, TrendingUp, Workflow } from "lucide-react";
 import AgentStatus from "../components/AgentStatus";
+import { useAuth } from "../lib/AuthContext";
 
 const HERO_BG = "https://images.unsplash.com/photo-1772862991841-f0e3e1502d7b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMGRhcmslMjB0ZWNobm9sb2d5JTIwbmV0d29yayUyMG5vZGVzfGVufDB8fHx8MTc3OTI2ODM0NXww&ixlib=rb-4.1.0&q=85";
 
@@ -14,7 +15,11 @@ const SPONSORS = [
   "https://images.unsplash.com/photo-1590664177914-9da6d6e8f0f6?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjV8MHwxfHNlYXJjaHwxfHxjb21wYW55JTIwbG9nbyUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3OTI2ODA0MHww&ixlib=rb-4.1.0&q=85",
 ];
 
-const Nav = () => (
+const Nav = () => {
+  const { user } = useAuth();
+  const startHref = user ? "/app/onboarding" : "/login";
+  const launchHref = user ? "/app/dashboard" : "/login";
+  return (
   <header
     className="fixed top-0 left-0 right-0 z-50 border-b"
     style={{ borderColor: "var(--nx-border)", background: "rgba(5,5,5,0.75)", backdropFilter: "blur(18px)" }}
@@ -38,18 +43,23 @@ const Nav = () => (
         ))}
       </nav>
       <div className="flex items-center gap-3">
-        <Link to="/app/dashboard" className="nx-btn-ghost hidden sm:inline-flex" data-testid="nav-launch-app">
-          Launch app <ArrowUpRight size={14} />
+        <Link to={launchHref} className="nx-btn-ghost hidden sm:inline-flex" data-testid="nav-launch-app">
+          {user ? "Launch app" : "Sign in"} <ArrowUpRight size={14} />
         </Link>
-        <Link to="/app/onboarding" className="nx-btn-primary" data-testid="nav-start-beta">
+        <Link to={startHref} className="nx-btn-primary" data-testid="nav-start-beta">
           Start beta <ArrowUpRight size={14} />
         </Link>
       </div>
     </div>
   </header>
-);
+  );
+};
 
-const Hero = () => (
+const Hero = () => {
+  const { user } = useAuth();
+  const startHref = user ? "/app/onboarding" : "/login";
+  const dashHref = user ? "/app/dashboard" : "/login";
+  return (
   <section className="relative pt-32 pb-20 overflow-hidden">
     <div className="absolute inset-0 -z-10">
       <img src={HERO_BG} alt="" className="w-full h-full object-cover opacity-25" />
@@ -81,10 +91,10 @@ const Hero = () => (
             <span className="text-zinc-200"> while you sleep.</span>
           </p>
           <div className="mt-10 flex flex-wrap items-center gap-4">
-            <Link to="/app/onboarding" className="nx-btn-primary" data-testid="hero-cta-primary">
+            <Link to={startHref} className="nx-btn-primary" data-testid="hero-cta-primary">
               Generate your first 10 targets <ArrowUpRight size={14} />
             </Link>
-            <Link to="/app/dashboard" className="nx-btn-ghost" data-testid="hero-cta-secondary">
+            <Link to={dashHref} className="nx-btn-ghost" data-testid="hero-cta-secondary">
               See the command center <ArrowUpRight size={14} />
             </Link>
           </div>
@@ -153,7 +163,8 @@ const Hero = () => (
       </div>
     </div>
   </section>
-);
+  );
+};
 
 const Sponsors = () => (
   <section className="py-12 border-y" style={{ borderColor: "var(--nx-border)" }}>
@@ -278,11 +289,16 @@ const Agents = () => {
 };
 
 const Pricing = () => {
+  const { user } = useAuth();
   const tiers = [
-    { name: "Operator", price: "$4,800", period: "/mo", features: ["3 AI agents", "500 prospects/mo", "Standard intent signals", "Email & calendar automation"], cta: "Start trial" },
-    { name: "Scale",    price: "$18,500", period: "/mo", features: ["7 AI agents", "Unlimited prospects", "Premium intent + dark social", "Full pipeline orchestration", "Slack & CRM bidirectional"], cta: "Start trial", featured: true },
-    { name: "Enterprise", price: "Custom", period: "", features: ["Custom agent fleet", "Dedicated revenue model", "On-prem signal sources", "White-glove deployment", "SOC2 + SSO + audit"], cta: "Talk to sales" },
+    { name: "Operator", price: "$4,800", period: "/mo", features: ["3 AI agents", "500 prospects/mo", "Standard intent signals", "Email & calendar automation"], cta: "Start trial", pkgId: "operator" },
+    { name: "Scale",    price: "$18,500", period: "/mo", features: ["7 AI agents", "Unlimited prospects", "Premium intent + dark social", "Full pipeline orchestration", "Slack & CRM bidirectional"], cta: "Start trial", featured: true, pkgId: "scale" },
+    { name: "Enterprise", price: "Custom", period: "", features: ["Custom agent fleet", "Dedicated revenue model", "On-prem signal sources", "White-glove deployment", "SOC2 + SSO + audit"], cta: "Talk to sales", pkgId: null },
   ];
+  const target = (pkgId) => {
+    if (!pkgId) return "mailto:sales@nexus.ai";
+    return user ? "/app/subscribe" : "/login";
+  };
   return (
     <section id="pricing" className="py-28">
       <div className="max-w-7xl mx-auto px-6 lg:px-10">
@@ -319,7 +335,7 @@ const Pricing = () => {
                   </li>
                 ))}
               </ul>
-              <Link to="/app/onboarding" className={t.featured ? "nx-btn-primary w-full justify-center" : "nx-btn-ghost w-full justify-center"} data-testid={`pricing-cta-${t.name.toLowerCase()}`}>
+              <Link to={target(t.pkgId)} className={t.featured ? "nx-btn-primary w-full justify-center" : "nx-btn-ghost w-full justify-center"} data-testid={`pricing-cta-${t.name.toLowerCase()}`}>
                 {t.cta} <ArrowUpRight size={14} />
               </Link>
             </div>
@@ -330,7 +346,11 @@ const Pricing = () => {
   );
 };
 
-const FinalCTA = () => (
+const FinalCTA = () => {
+  const { user } = useAuth();
+  const startHref = user ? "/app/onboarding" : "/login";
+  const dashHref = user ? "/app/dashboard" : "/login";
+  return (
   <section id="customers" className="py-28 relative overflow-hidden">
     <div className="absolute inset-0 -z-10">
       <div className="absolute inset-0" style={{ background: "radial-gradient(800px 400px at 50% 50%, rgba(0,245,212,0.08), transparent 60%)" }} />
@@ -345,16 +365,17 @@ const FinalCTA = () => (
         In 60 seconds, Nexus will study your business and generate your first 10 high-value prospects — live.
       </p>
       <div className="mt-10 flex items-center justify-center gap-4 flex-wrap">
-        <Link to="/app/onboarding" className="nx-btn-primary" data-testid="final-cta-onboard">
+        <Link to={startHref} className="nx-btn-primary" data-testid="final-cta-onboard">
           <Rocket size={14} /> Begin onboarding
         </Link>
-        <Link to="/app/dashboard" className="nx-btn-ghost" data-testid="final-cta-demo">
+        <Link to={dashHref} className="nx-btn-ghost" data-testid="final-cta-demo">
           <GitBranch size={14} /> See live demo
         </Link>
       </div>
     </div>
   </section>
-);
+  );
+};
 
 const Footer = () => (
   <footer className="border-t py-12" style={{ borderColor: "var(--nx-border)" }}>

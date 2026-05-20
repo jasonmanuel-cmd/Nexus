@@ -7,6 +7,7 @@ export const api = axios.create({
   baseURL: API,
   headers: { "Content-Type": "application/json" },
   timeout: 90000,
+  withCredentials: true,
 });
 
 export const fmtUSD = (n) =>

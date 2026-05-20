@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Cookie, Header
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -7,7 +7,7 @@ import os
 import json
 import random
 import logging
-import asyncio
+import httpx
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
@@ -18,30 +18,42 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.payments.stripe.checkout import (
+    StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
+)
 
-# MongoDB
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
 
 app = FastAPI(title="Nexus AI - Autonomous CRO")
 api_router = APIRouter(prefix="/api")
 
 
-# ============== MODELS ==============
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# ============== MODELS ==============
+class User(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    picture: Optional[str] = None
+    created_at: str = Field(default_factory=now_iso)
+
+
 class OnboardingProfile(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     company_name: str
     industry: str
-    company_size: str  # e.g. "11-50", "51-200", etc.
+    company_size: str
     annual_revenue: Optional[str] = None
-    icp_description: str  # ideal customer profile
+    icp_description: str
     value_proposition: str
     target_geographies: Optional[List[str]] = []
     created_at: str = Field(default_factory=now_iso)
@@ -59,6 +71,7 @@ class OnboardingCreate(BaseModel):
 
 class Target(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     profile_id: str
     company_name: str
     industry: str
@@ -66,17 +79,19 @@ class Target(BaseModel):
     employee_count: str
     estimated_revenue: str
     intent_signal: str
-    signal_strength: int  # 0-100
+    signal_strength: int
     decision_maker_name: str
     decision_maker_title: str
     estimated_deal_size: str
     recommended_play: str
-    fit_score: int  # 0-100
+    fit_score: int
+    promoted_deal_id: Optional[str] = None
     created_at: str = Field(default_factory=now_iso)
 
 
 class Deal(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     company: str
     contact: str
     value: float
@@ -84,6 +99,7 @@ class Deal(BaseModel):
     probability: int
     agent_status: Literal["idle", "scanning", "thinking", "closing"]
     last_action: str
+    source_target_id: Optional[str] = None
     updated_at: str = Field(default_factory=now_iso)
 
 
@@ -97,29 +113,157 @@ class DealCreate(BaseModel):
 
 class DealUpdate(BaseModel):
     stage: Optional[str] = None
+    probability: Optional[int] = None
     agent_status: Optional[str] = None
     last_action: Optional[str] = None
 
 
 class Signal(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     company: str
     domain: str
-    signal_type: str  # "hiring", "funding", "tech_change", "expansion", "social"
+    signal_type: str
     description: str
-    strength: int  # 0-100
+    strength: int
     source: str
     detected_at: str = Field(default_factory=now_iso)
 
 
 class Activity(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
     agent: str
     action: str
     target: str
     outcome: Optional[str] = None
     status: Literal["scanning", "thinking", "closing", "idle"]
     timestamp: str = Field(default_factory=now_iso)
+
+
+# ============== AUTH ==============
+EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
+
+async def get_current_user(
+    request: Request,
+    session_token: Optional[str] = Cookie(None),
+    authorization: Optional[str] = Header(None),
+) -> User:
+    """Resolve current user from cookie or Bearer header."""
+    token = session_token
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(401, "Not authenticated")
+
+    session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not session:
+        raise HTTPException(401, "Invalid session")
+
+    expires_at = session.get("expires_at")
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at and expires_at < datetime.now(timezone.utc):
+        raise HTTPException(401, "Session expired")
+
+    user_doc = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(401, "User not found")
+    return User(**user_doc)
+
+
+async def ensure_seed_data(user_id: str):
+    """Seed per-user demo data on first login if their collections are empty."""
+    if await db.deals.count_documents({"user_id": user_id}) == 0:
+        for d in SAMPLE_DEALS:
+            deal = Deal(user_id=user_id, **d)
+            await db.deals.insert_one(dict(deal.model_dump()))
+    if await db.signals.count_documents({"user_id": user_id}) == 0:
+        base = datetime.now(timezone.utc)
+        for i, s in enumerate(SAMPLE_SIGNALS):
+            sig = Signal(user_id=user_id, **s)
+            sig_doc = sig.model_dump()
+            sig_doc["detected_at"] = (base - timedelta(minutes=i * 7)).isoformat()
+            await db.signals.insert_one(sig_doc)
+    if await db.activities.count_documents({"user_id": user_id}) == 0:
+        base = datetime.now(timezone.utc)
+        for i, a in enumerate(SAMPLE_ACTIVITIES):
+            act = Activity(user_id=user_id, **a)
+            act_doc = act.model_dump()
+            act_doc["timestamp"] = (base - timedelta(minutes=i * 3)).isoformat()
+            await db.activities.insert_one(act_doc)
+
+
+@api_router.post("/auth/session")
+async def auth_session(request: Request, response: Response):
+    """Exchange Emergent session_id for a session token + cookie."""
+    body = await request.json()
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        r = await http.get(EMERGENT_AUTH_URL, headers={"X-Session-ID": session_id})
+    if r.status_code != 200:
+        raise HTTPException(401, "Auth exchange failed")
+    data = r.json()
+    email = data["email"]
+
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        user_id = existing["user_id"]
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"name": data.get("name", existing.get("name")), "picture": data.get("picture")}},
+        )
+    else:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        await db.users.insert_one(User(
+            user_id=user_id, email=email, name=data.get("name", ""), picture=data.get("picture"),
+        ).model_dump())
+
+    session_token = data["session_token"]
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.user_sessions.insert_one({
+        "user_id": user_id,
+        "session_token": session_token,
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Seed demo data per user on first login
+    await ensure_seed_data(user_id)
+
+    response.set_cookie(
+        key="session_token", value=session_token,
+        httponly=True, secure=True, samesite="none",
+        path="/", max_age=7 * 24 * 3600,
+    )
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    return {"user": user_doc, "session_token": session_token}
+
+
+@api_router.get("/auth/me")
+async def auth_me(user: User = Depends(get_current_user)):
+    # Self-heal: seed demo data if user has none (idempotent)
+    await ensure_seed_data(user.user_id)
+    return user.model_dump()
+
+
+@api_router.post("/auth/logout")
+async def auth_logout(response: Response, request: Request, session_token: Optional[str] = Cookie(None)):
+    token = session_token
+    if not token:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            token = auth.split(" ", 1)[1].strip()
+    if token:
+        await db.user_sessions.delete_one({"session_token": token})
+    response.delete_cookie("session_token", path="/")
+    return {"ok": True}
 
 
 # ============== ROUTES ==============
@@ -130,24 +274,23 @@ async def root():
 
 # ---------- Onboarding ----------
 @api_router.post("/onboarding", response_model=OnboardingProfile)
-async def create_onboarding(payload: OnboardingCreate):
-    profile = OnboardingProfile(**payload.model_dump())
-    doc = profile.model_dump()
-    await db.profiles.insert_one(dict(doc))
+async def create_onboarding(payload: OnboardingCreate, user: User = Depends(get_current_user)):
+    profile = OnboardingProfile(user_id=user.user_id, **payload.model_dump())
+    await db.profiles.insert_one(dict(profile.model_dump()))
     return profile
 
 
 @api_router.get("/onboarding/latest", response_model=Optional[OnboardingProfile])
-async def latest_onboarding():
-    doc = await db.profiles.find_one({}, {"_id": 0}, sort=[("created_at", -1)])
+async def latest_onboarding(user: User = Depends(get_current_user)):
+    doc = await db.profiles.find_one({"user_id": user.user_id}, {"_id": 0}, sort=[("created_at", -1)])
     if not doc:
         return None
     return OnboardingProfile(**doc)
 
 
 @api_router.get("/onboarding/{profile_id}", response_model=OnboardingProfile)
-async def get_onboarding(profile_id: str):
-    doc = await db.profiles.find_one({"id": profile_id}, {"_id": 0})
+async def get_onboarding(profile_id: str, user: User = Depends(get_current_user)):
+    doc = await db.profiles.find_one({"id": profile_id, "user_id": user.user_id}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Profile not found")
     return OnboardingProfile(**doc)
@@ -179,11 +322,11 @@ No markdown, no commentary, no code fences. Just raw JSON."""
 
 
 @api_router.post("/targets/generate")
-async def generate_targets(body: dict):
+async def generate_targets(body: dict, user: User = Depends(get_current_user)):
     profile_id = body.get("profile_id")
     if not profile_id:
         raise HTTPException(400, "profile_id required")
-    profile_doc = await db.profiles.find_one({"id": profile_id}, {"_id": 0})
+    profile_doc = await db.profiles.find_one({"id": profile_id, "user_id": user.user_id}, {"_id": 0})
     if not profile_doc:
         raise HTTPException(404, "Profile not found")
 
@@ -209,8 +352,6 @@ Generate 10 high-value prospect targets in strict JSON."""
         ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
         response_text = await chat.send_message(UserMessage(text=user_prompt))
-
-        # Try to extract JSON
         cleaned = response_text.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("```", 2)[1]
@@ -218,20 +359,21 @@ Generate 10 high-value prospect targets in strict JSON."""
                 cleaned = cleaned[4:]
             cleaned = cleaned.rsplit("```", 1)[0]
         cleaned = cleaned.strip()
-
         parsed = json.loads(cleaned)
         raw_targets = parsed.get("targets", [])
     except Exception as e:
         logging.error(f"LLM error: {e}")
         raise HTTPException(500, f"AI generation failed: {str(e)[:200]}")
 
-    # Persist
+    if not raw_targets:
+        raise HTTPException(500, "AI returned no targets — try again")
+
+    await db.targets.delete_many({"profile_id": profile_id, "user_id": user.user_id})
     targets: List[Target] = []
-    # Clear previous targets for this profile so the user sees fresh ones
-    await db.targets.delete_many({"profile_id": profile_id})
     for raw in raw_targets[:10]:
         try:
             t = Target(
+                user_id=user.user_id,
                 profile_id=profile_id,
                 company_name=str(raw.get("company_name", "Unknown")),
                 industry=str(raw.get("industry", "")),
@@ -255,25 +397,84 @@ Generate 10 high-value prospect targets in strict JSON."""
 
 
 @api_router.get("/targets")
-async def list_targets(profile_id: Optional[str] = None):
-    query = {"profile_id": profile_id} if profile_id else {}
+async def list_targets(user: User = Depends(get_current_user), profile_id: Optional[str] = None):
+    query = {"user_id": user.user_id}
+    if profile_id:
+        query["profile_id"] = profile_id
     docs = await db.targets.find(query, {"_id": 0}).sort("fit_score", -1).to_list(50)
     return {"targets": docs}
 
 
+def _parse_deal_size(s: str) -> float:
+    """Extract a float from a deal-size string like '$85K ACV' or '$120,000'."""
+    import re
+    if not s:
+        return 50000.0
+    s_clean = s.replace(",", "").upper()
+    m = re.search(r"\$?\s*([0-9]+(?:\.[0-9]+)?)\s*([KM]?)", s_clean)
+    if not m:
+        return 50000.0
+    val = float(m.group(1))
+    mult = m.group(2)
+    if mult == "K":
+        val *= 1000
+    elif mult == "M":
+        val *= 1_000_000
+    return val
+
+
+@api_router.post("/targets/{target_id}/promote")
+async def promote_target(target_id: str, user: User = Depends(get_current_user)):
+    """Promote a target to a pipeline deal."""
+    target = await db.targets.find_one({"id": target_id, "user_id": user.user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "Target not found")
+    if target.get("promoted_deal_id"):
+        existing = await db.deals.find_one({"id": target["promoted_deal_id"], "user_id": user.user_id}, {"_id": 0})
+        if existing:
+            return {"deal": existing, "already_promoted": True}
+
+    deal = Deal(
+        user_id=user.user_id,
+        company=target["company_name"],
+        contact=f"{target['decision_maker_name']}, {target['decision_maker_title']}",
+        value=_parse_deal_size(target["estimated_deal_size"]),
+        stage="prospecting",
+        probability=min(40, max(15, target.get("signal_strength", 75) // 3)),
+        agent_status="scanning",
+        last_action=f"Promoted from target · {target['recommended_play'][:80]}",
+        source_target_id=target_id,
+    )
+    await db.deals.insert_one(dict(deal.model_dump()))
+    await db.targets.update_one(
+        {"id": target_id, "user_id": user.user_id},
+        {"$set": {"promoted_deal_id": deal.id}},
+    )
+    # Log activity
+    act = Activity(
+        user_id=user.user_id,
+        agent="Pipeline-Analyst",
+        action="Target promoted to pipeline",
+        target=target["company_name"],
+        outcome=f"${int(deal.value):,} ACV",
+        status="thinking",
+    )
+    await db.activities.insert_one(dict(act.model_dump()))
+    return {"deal": deal.model_dump(), "already_promoted": False}
+
+
 # ---------- Dashboard ----------
 @api_router.get("/dashboard/metrics")
-async def dashboard_metrics():
-    # Pull live counts where possible; derive realistic deltas
-    deal_count = await db.deals.count_documents({})
-    targets_count = await db.targets.count_documents({})
-    activities = await db.activities.count_documents({})
+async def dashboard_metrics(user: User = Depends(get_current_user)):
+    uid = user.user_id
+    targets_count = await db.targets.count_documents({"user_id": uid})
+    activities = await db.activities.count_documents({"user_id": uid})
 
-    won = await db.deals.find({"stage": "closed_won"}, {"_id": 0, "value": 1}).to_list(500)
+    won = await db.deals.find({"user_id": uid, "stage": "closed_won"}, {"_id": 0, "value": 1}).to_list(500)
     won_value = sum(d.get("value", 0) for d in won)
 
     pipeline_open = await db.deals.find(
-        {"stage": {"$in": ["prospecting", "qualified", "proposal", "negotiation"]}},
+        {"user_id": uid, "stage": {"$in": ["prospecting", "qualified", "proposal", "negotiation"]}},
         {"_id": 0, "value": 1, "probability": 1}
     ).to_list(500)
     pipeline_value = sum(d.get("value", 0) for d in pipeline_open)
@@ -294,30 +495,52 @@ async def dashboard_metrics():
 
 
 @api_router.get("/dashboard/activity")
-async def dashboard_activity(limit: int = 25):
-    docs = await db.activities.find({}, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+async def dashboard_activity(limit: int = 25, user: User = Depends(get_current_user)):
+    docs = await db.activities.find({"user_id": user.user_id}, {"_id": 0}).sort("timestamp", -1).to_list(limit)
     return {"activities": docs}
+
+
+@api_router.get("/dashboard/charts")
+async def dashboard_charts(user: User = Depends(get_current_user)):
+    """Data for Recharts visuals: revenue waterfall and agent productivity."""
+    uid = user.user_id
+    stages = ["prospecting", "qualified", "proposal", "negotiation", "closed_won"]
+    waterfall = []
+    for s in stages:
+        deals = await db.deals.find({"user_id": uid, "stage": s}, {"_id": 0, "value": 1, "probability": 1}).to_list(200)
+        total = sum(d.get("value", 0) for d in deals)
+        weighted = sum(d.get("value", 0) * d.get("probability", 0) / 100 for d in deals)
+        waterfall.append({"stage": s.replace("_", " ").upper(), "total": total, "weighted": round(weighted, 0), "count": len(deals)})
+
+    # Agent productivity: count activities per agent
+    agents = ["LeadScout-7", "Outreach-Composer", "Researcher-3", "Meeting-Booker", "Negotiator-Prime", "Pipeline-Analyst", "Forecaster"]
+    productivity = []
+    for a in agents:
+        c = await db.activities.count_documents({"user_id": uid, "agent": a})
+        productivity.append({"agent": a.replace("-", " "), "actions": c})
+
+    return {"waterfall": waterfall, "productivity": productivity}
 
 
 # ---------- Lead Engine ----------
 @api_router.get("/leads/signals")
-async def list_signals(limit: int = 40):
-    docs = await db.signals.find({}, {"_id": 0}).sort("detected_at", -1).to_list(limit)
+async def list_signals(limit: int = 40, user: User = Depends(get_current_user)):
+    docs = await db.signals.find({"user_id": user.user_id}, {"_id": 0}).sort("detected_at", -1).to_list(limit)
     return {"signals": docs}
 
 
 @api_router.post("/leads/scan")
-async def trigger_scan():
-    """Simulate a fresh scan: log an activity and emit 3-5 new signals."""
+async def trigger_scan(user: User = Depends(get_current_user)):
     new_signals = []
     sample_pool = SAMPLE_SIGNALS.copy()
     random.shuffle(sample_pool)
     for raw in sample_pool[:random.randint(3, 5)]:
-        s = Signal(**raw)
+        s = Signal(user_id=user.user_id, **raw)
         await db.signals.insert_one(dict(s.model_dump()))
         new_signals.append(s.model_dump())
 
     act = Activity(
+        user_id=user.user_id,
         agent="LeadScout-7",
         action="Web scan completed across 12,400 sources",
         target=f"{len(new_signals)} new high-intent signals captured",
@@ -329,14 +552,15 @@ async def trigger_scan():
 
 # ---------- Pipeline ----------
 @api_router.get("/pipeline/deals")
-async def list_deals():
-    docs = await db.deals.find({}, {"_id": 0}).sort("updated_at", -1).to_list(200)
+async def list_deals(user: User = Depends(get_current_user)):
+    docs = await db.deals.find({"user_id": user.user_id}, {"_id": 0}).sort("updated_at", -1).to_list(200)
     return {"deals": docs}
 
 
 @api_router.post("/pipeline/deals", response_model=Deal)
-async def create_deal(payload: DealCreate):
+async def create_deal(payload: DealCreate, user: User = Depends(get_current_user)):
     deal = Deal(
+        user_id=user.user_id,
         company=payload.company,
         contact=payload.contact,
         value=payload.value,
@@ -350,14 +574,146 @@ async def create_deal(payload: DealCreate):
 
 
 @api_router.patch("/pipeline/deals/{deal_id}", response_model=Deal)
-async def update_deal(deal_id: str, payload: DealUpdate):
+async def update_deal(deal_id: str, payload: DealUpdate, user: User = Depends(get_current_user)):
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
     updates["updated_at"] = now_iso()
-    res = await db.deals.update_one({"id": deal_id}, {"$set": updates})
+    res = await db.deals.update_one({"id": deal_id, "user_id": user.user_id}, {"$set": updates})
     if res.matched_count == 0:
         raise HTTPException(404, "Deal not found")
-    doc = await db.deals.find_one({"id": deal_id}, {"_id": 0})
+    doc = await db.deals.find_one({"id": deal_id, "user_id": user.user_id}, {"_id": 0})
     return Deal(**doc)
+
+
+# ---------- Stripe Payments ----------
+PACKAGES = {
+    "operator": {"amount": 4800.0, "name": "Operator", "description": "3 AI agents · 500 prospects/mo"},
+    "scale":    {"amount": 18500.0, "name": "Scale",   "description": "7 AI agents · Unlimited prospects"},
+}
+
+
+class CheckoutCreate(BaseModel):
+    package_id: str
+    origin_url: str
+
+
+@api_router.post("/payments/checkout/session")
+async def create_checkout(payload: CheckoutCreate, request: Request, user: User = Depends(get_current_user)):
+    pkg = PACKAGES.get(payload.package_id)
+    if not pkg:
+        raise HTTPException(400, "Invalid package")
+    if not STRIPE_API_KEY:
+        raise HTTPException(500, "Stripe not configured")
+
+    host_url = str(request.base_url)
+    webhook_url = f"{host_url}api/webhook/stripe".replace("//api", "/api")
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+
+    origin = payload.origin_url.rstrip("/")
+    success_url = f"{origin}/app/checkout-return?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/app/dashboard"
+
+    req = CheckoutSessionRequest(
+        amount=pkg["amount"],
+        currency="usd",
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata={"user_id": user.user_id, "package_id": payload.package_id, "email": user.email},
+    )
+    session = await stripe.create_checkout_session(req)
+
+    await db.payment_transactions.insert_one({
+        "session_id": session.session_id,
+        "user_id": user.user_id,
+        "email": user.email,
+        "package_id": payload.package_id,
+        "amount": pkg["amount"],
+        "currency": "usd",
+        "payment_status": "initiated",
+        "status": "open",
+        "metadata": {"package_id": payload.package_id, "user_id": user.user_id},
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    })
+
+    return {"url": session.url, "session_id": session.session_id}
+
+
+@api_router.get("/payments/checkout/status/{session_id}")
+async def checkout_status(session_id: str, request: Request, user: User = Depends(get_current_user)):
+    if not STRIPE_API_KEY:
+        raise HTTPException(500, "Stripe not configured")
+    host_url = str(request.base_url)
+    webhook_url = f"{host_url}api/webhook/stripe".replace("//api", "/api")
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+
+    txn = await db.payment_transactions.find_one({"session_id": session_id, "user_id": user.user_id}, {"_id": 0})
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+
+    status: CheckoutStatusResponse = await stripe.get_checkout_status(session_id)
+
+    new_payment_status = status.payment_status
+    if txn["payment_status"] != "paid" and new_payment_status == "paid":
+        await db.payment_transactions.update_one(
+            {"session_id": session_id},
+            {"$set": {"payment_status": new_payment_status, "status": status.status, "updated_at": now_iso()}},
+        )
+        await db.users.update_one(
+            {"user_id": user.user_id},
+            {"$set": {"subscription_package": txn.get("package_id"), "subscription_active": True, "subscribed_at": now_iso()}},
+        )
+        # Activity log
+        act = Activity(
+            user_id=user.user_id,
+            agent="Pipeline-Analyst",
+            action="Subscription activated",
+            target=PACKAGES.get(txn.get("package_id"), {}).get("name", "Plan"),
+            outcome=f"${txn.get('amount', 0):,.0f}/mo",
+            status="closing",
+        )
+        await db.activities.insert_one(dict(act.model_dump()))
+    elif txn["payment_status"] != new_payment_status:
+        await db.payment_transactions.update_one(
+            {"session_id": session_id},
+            {"$set": {"payment_status": new_payment_status, "status": status.status, "updated_at": now_iso()}},
+        )
+
+    return {
+        "session_id": session_id,
+        "status": status.status,
+        "payment_status": new_payment_status,
+        "amount_total": status.amount_total,
+        "currency": status.currency,
+        "package_id": txn.get("package_id"),
+    }
+
+
+@api_router.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    if not STRIPE_API_KEY:
+        return {"ok": False}
+    body = await request.body()
+    sig = request.headers.get("Stripe-Signature")
+    host_url = str(request.base_url)
+    webhook_url = f"{host_url}api/webhook/stripe".replace("//api", "/api")
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    try:
+        evt = await stripe.handle_webhook(body, sig)
+    except Exception as e:
+        logging.error(f"Stripe webhook error: {e}")
+        return {"ok": False}
+
+    if evt.session_id:
+        await db.payment_transactions.update_one(
+            {"session_id": evt.session_id},
+            {"$set": {"payment_status": evt.payment_status, "webhook_event": evt.event_type, "updated_at": now_iso()}},
+        )
+    return {"ok": True}
+
+
+@api_router.get("/payments/packages")
+async def list_packages():
+    return {"packages": [{"id": k, **v} for k, v in PACKAGES.items()]}
 
 
 # ============== SEED DATA ==============
@@ -404,30 +760,6 @@ SAMPLE_ACTIVITIES = [
     {"agent": "Pipeline-Analyst", "action": "Velocity report generated", "target": "Q1 Pipeline", "outcome": "Avg cycle: 23d (-6d MoM)", "status": "idle"},
     {"agent": "Meeting-Booker", "action": "3 meetings booked", "target": "Polaris, Vantix, Quantica", "outcome": "All this week", "status": "closing"},
 ]
-
-
-@app.on_event("startup")
-async def seed():
-    # Seed only if empty
-    if await db.deals.count_documents({}) == 0:
-        for d in SAMPLE_DEALS:
-            deal = Deal(**d)
-            await db.deals.insert_one(dict(deal.model_dump()))
-    if await db.signals.count_documents({}) == 0:
-        base = datetime.now(timezone.utc)
-        for i, s in enumerate(SAMPLE_SIGNALS):
-            sig = Signal(**s)
-            sig_doc = sig.model_dump()
-            # Stagger detected_at so the feed looks live
-            sig_doc["detected_at"] = (base - timedelta(minutes=i * 7)).isoformat()
-            await db.signals.insert_one(sig_doc)
-    if await db.activities.count_documents({}) == 0:
-        base = datetime.now(timezone.utc)
-        for i, a in enumerate(SAMPLE_ACTIVITIES):
-            act = Activity(**a)
-            act_doc = act.model_dump()
-            act_doc["timestamp"] = (base - timedelta(minutes=i * 3)).isoformat()
-            await db.activities.insert_one(act_doc)
 
 
 app.include_router(api_router)

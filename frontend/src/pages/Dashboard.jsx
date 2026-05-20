@@ -1,20 +1,18 @@
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { api, fmtUSD } from "../lib/api";
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, AreaChart, Area, CartesianGrid } from "recharts";
+import { api, fmtUSD, fmtCompact } from "../lib/api";
 import AgentStatus from "../components/AgentStatus";
 import Ticker from "../components/Ticker";
 import { Activity, TrendingUp, Calendar, Target, Brain, GitBranch, Zap } from "lucide-react";
 
 const formatTime = (iso) => {
   try {
-    const d = new Date(iso);
-    const diff = Math.round((Date.now() - d.getTime()) / 1000);
+    const diff = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
     if (diff < 60) return `${diff}s ago`;
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     return `${Math.floor(diff / 3600)}h ago`;
-  } catch {
-    return iso;
-  }
+  } catch { return iso; }
 };
 
 const MetricCard = ({ label, value, sub, icon: Icon, testid, format }) => (
@@ -30,16 +28,36 @@ const MetricCard = ({ label, value, sub, icon: Icon, testid, format }) => (
   </div>
 );
 
+const ChartTooltip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="nx-glass px-3 py-2 text-xs">
+      <div className="nx-label mb-1">{label}</div>
+      {payload.map((p, i) => (
+        <div key={i} className="text-zinc-200" style={{ color: p.color }}>
+          {p.name}: <span className="font-mono">{typeof p.value === "number" ? fmtCompact(p.value) : p.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 export default function Dashboard() {
   const [metrics, setMetrics] = useState(null);
   const [activities, setActivities] = useState([]);
+  const [charts, setCharts] = useState({ waterfall: [], productivity: [] });
   const [loading, setLoading] = useState(true);
 
   const fetchAll = async () => {
     try {
-      const [m, a] = await Promise.all([api.get("/dashboard/metrics"), api.get("/dashboard/activity")]);
+      const [m, a, c] = await Promise.all([
+        api.get("/dashboard/metrics"),
+        api.get("/dashboard/activity"),
+        api.get("/dashboard/charts"),
+      ]);
       setMetrics(m.data);
       setActivities(a.data.activities || []);
+      setCharts(c.data);
     } catch (e) {
       console.error(e);
     } finally {
@@ -55,7 +73,6 @@ export default function Dashboard() {
 
   return (
     <div className="p-6 lg:p-10" data-testid="dashboard-page">
-      {/* Header */}
       <div className="flex items-end justify-between mb-8 flex-wrap gap-4">
         <div>
           <div className="nx-label mb-2">[ COMMAND CENTER ]</div>
@@ -67,8 +84,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Metrics row */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
         <MetricCard label="REVENUE WON" value={metrics?.revenue_won || 0} format={fmtUSD} icon={TrendingUp} testid="metric-revenue-won" />
         <MetricCard label="PIPELINE" value={metrics?.pipeline_value || 0} format={fmtUSD} icon={GitBranch} testid="metric-pipeline" />
         <MetricCard label="WEIGHTED" value={metrics?.weighted_pipeline || 0} format={fmtUSD} icon={Brain} testid="metric-weighted" />
@@ -77,9 +93,60 @@ export default function Dashboard() {
         <MetricCard label="WIN RATE" value={(metrics?.win_rate || 0) * 100} format={(n) => `${n.toFixed(1)}%`} icon={Zap} testid="metric-win-rate" />
       </div>
 
+      {/* Charts row */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+        <div className="lg:col-span-2 nx-glass p-6" data-testid="waterfall-chart">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <div className="nx-label">REVENUE WATERFALL</div>
+              <h2 className="font-serif text-xl mt-1">Pipeline → Won</h2>
+            </div>
+            <AgentStatus status="thinking" />
+          </div>
+          <div className="h-[260px]">
+            <ResponsiveContainer>
+              <BarChart data={charts.waterfall} margin={{ top: 10, right: 10, left: 0, bottom: 10 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                <XAxis dataKey="stage" tick={{ fill: "#a1a1aa", fontSize: 10, fontFamily: "Geist Mono" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} />
+                <YAxis tick={{ fill: "#a1a1aa", fontSize: 10, fontFamily: "Geist Mono" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} tickFormatter={fmtCompact} />
+                <Tooltip content={<ChartTooltip />} cursor={{ fill: "rgba(0,245,212,0.05)" }} />
+                <Bar dataKey="total" name="Total" fill="rgba(0,245,212,0.2)" stroke="#00f5d4" strokeWidth={1} radius={[2, 2, 0, 0]} />
+                <Bar dataKey="weighted" name="Weighted" fill="rgba(255,85,0,0.18)" stroke="#ff5500" strokeWidth={1} radius={[2, 2, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="nx-glass p-6" data-testid="productivity-chart">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <div className="nx-label">AGENT PRODUCTIVITY</div>
+              <h2 className="font-serif text-xl mt-1">Actions / agent</h2>
+            </div>
+            <AgentStatus status="scanning" />
+          </div>
+          <div className="h-[260px]">
+            <ResponsiveContainer>
+              <AreaChart data={charts.productivity} margin={{ top: 10, right: 5, left: 0, bottom: 10 }}>
+                <defs>
+                  <linearGradient id="cyanGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#00f5d4" stopOpacity={0.45} />
+                    <stop offset="100%" stopColor="#00f5d4" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                <XAxis dataKey="agent" tick={{ fill: "#a1a1aa", fontSize: 8, fontFamily: "Geist Mono" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} angle={-25} textAnchor="end" height={60} />
+                <YAxis tick={{ fill: "#a1a1aa", fontSize: 10, fontFamily: "Geist Mono" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} />
+                <Tooltip content={<ChartTooltip />} cursor={{ stroke: "#00f5d4", strokeWidth: 1, strokeDasharray: "3 3" }} />
+                <Area type="monotone" dataKey="actions" stroke="#00f5d4" strokeWidth={1.5} fill="url(#cyanGrad)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+
       {/* Body grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Activity feed */}
         <div className="lg:col-span-2 nx-glass p-6 relative" data-testid="activity-feed">
           <div className="flex items-center justify-between mb-6">
             <div>
@@ -121,7 +188,6 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Side panels */}
         <div className="flex flex-col gap-4">
           <div className="nx-glass p-6" data-testid="agent-fleet">
             <div className="nx-label mb-4">AGENT FLEET</div>

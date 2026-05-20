@@ -1,0 +1,43 @@
+{
+  "summary": "v2 testing of Nexus AI (auth, charts, promote, Stripe, DnD, landing). Backend: 13/14 pytest cases pass — only GET /api/payments/checkout/status/{session_id} returns 500 from Stripe ('No such checkout.session'). Frontend: dashboard with both Recharts (waterfall + productivity) loads under demo cookie; sidebar shows Demo Founder / demo@nexus.ai; Pipeline DnD via Playwright drag_to triggered PATCH /api/pipeline/deals/{id} -> 200; /app/dashboard without cookie redirects to /login; /login renders google-signin-btn; Landing 'Start beta' for unauth user correctly routes to /login; Subscribe page renders both packages and POST /api/payments/checkout/session returns 200 + URL. ONE FRONTEND BUG: /app/onboarding never transitions to results phase on mount even though demo user has a profile (TEST_Promote_950d43) + 10 generated targets (both /api/onboarding/latest and /api/targets?profile_id=... return 200) — page stays in wizard Step 1 with company_name pre-filled, so target-promote-{i} buttons never render.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/payments/checkout/status/{session_id}", "issue": "Returns HTTP 500 immediately after creating a checkout session. Stripe error: 'No such checkout.session: cs_test_...'. Backend should catch CheckoutError and return a graceful status (e.g. payment_status='pending'/'unknown' with 200, or 502/404) instead of leaking 500.", "priority": "HIGH"}
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Onboarding.jsx (useEffect on mount, lines 52-78)", "issue": "When demo user already has a profile + targets, useEffect calls /onboarding/latest (200) and /targets?profile_id=... (200 with 10 targets) — setProfileId + setForm fire (company_name visible in form), but setPhase('results') never takes effect. Page stays in phase='form' Step 0, so target-promote-{i} buttons never render and the promote-to-pipeline feature is unreachable from a returning session. Likely a race with AuthContext mount: first /auth/me returns 401 (cookie not yet attached) which may cause a ProtectedRoute remount that interrupts the effect's setPhase before targets land.", "selector": "[data-testid^=\"target-promote-\"]", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_nexus_v2.py",
+    "/app/test_reports/pytest/pytest_v2.xml"
+  ],
+  "action_items": [
+    "Wrap stripe.get_checkout_status(...) in try/except CheckoutError in /api/payments/checkout/status/{session_id} and return the cached txn row (or 200 with payment_status='unknown') instead of raising 500.",
+    "Fix Onboarding.jsx auto-load: ensure setPhase('results') is honored on returning session. Suggested fix: guard useEffect on `user` from AuthContext being non-null (run only after auth resolved), or move the auto-load inside a useEffect that depends on `user?.user_id`. Currently the effect fires before /auth/me resolves, the first /onboarding/latest may resolve while ProtectedRoute is still gating, and the setState chain gets dropped.",
+    "Optional: also expose a UI affordance to view results when profile already exists (e.g., 'View my targets' link in wizard header) so users aren't stuck in the wizard if the auto-transition fails."
+  ],
+  "critical_code_review_comments": [
+    "/api/payments/checkout/status lacks defensive error handling around 3rd-party Stripe call — any transient Stripe error surfaces as 500 to the client.",
+    "Onboarding.jsx initial-mount effect has no dependency on auth readiness; relying on api.js's withCredentials + cookie works for direct browser hits but is racy when AuthContext hasn't resolved yet.",
+    "ProtectedRoute behavior when /auth/me returns 401 should be reviewed — the second /auth/me call returns 200, suggesting the cookie was set after the initial render; consider blocking child render until auth state is known.",
+    "/api/payments/checkout/session inserts payment_transactions row with payment_status='initiated' — schema diverges from Stripe-canonical values ('unpaid','paid','no_payment_required'). Consider normalizing.",
+    "server.py is now 782 lines and growing — recommend splitting into routers (auth, payments, dashboard, leads, pipeline, onboarding, targets) per code-review guideline.",
+    "Existing iteration_1 comment still valid: @app.on_event deprecated; migrate to lifespan."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_nexus_v2.py (new)"
+  ],
+  "success_rate": {"backend": "93% (13/14)", "frontend": "83% (5/6 flows — onboarding promote blocked)"},
+  "test_credentials": "Demo session token: demo_session_token_persistent (Bearer header or cookie). user_id=demo-user-001, email=demo@nexus.ai. Pre-seeded in /app/memory/test_credentials.md.",
+  "seed_data_creation": "Test created a TEST_Promote_* profile + 10 LLM-generated targets via /api/targets/generate, plus a transient second test user (test-user-{uuid}) for scoping verification (auto-cleaned). Stripe payment_transactions docs created for 2 checkout sessions (one cleaned, one left for status test).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Two fixes to verify next iteration: (1) GET /api/payments/checkout/status should return 200 (or graceful error) not 500 when Stripe can't yet find the session; (2) Onboarding page should show results phase with [data-testid=target-promote-0..N] buttons when demo user reloads /app/onboarding (profile + targets already exist). Other v2 features (auth gating, charts, DnD pipeline, subscribe checkout creation, landing routing) all verified working. Pytest file at /app/backend/tests/test_nexus_v2.py is parameterized and idempotent — safe to rerun.",
+  "rca of the issue": "(1) checkout/status 500: backend calls stripe.get_checkout_status() without try/except — emergentintegrations raises CheckoutError when Stripe returns 'No such checkout.session' (likely an eventual-consistency or test-key behavior). Fix: catch CheckoutError and fall back to local txn row's payment_status. (2) Onboarding stuck in wizard: AuthContext-induced remount race — first /auth/me returns 401, AuthProvider's state flips, ProtectedRoute unmounts/remounts Onboarding, in-flight setPhase('results') from the initial effect is discarded. The second mount's /targets call returns 10 targets but the setPhase happens AFTER the form has already rendered Step 0, and the effect chain may have been aborted by the unmount. Fix: gate the auto-load effect on auth-ready (user !== null in AuthContext)."
+}

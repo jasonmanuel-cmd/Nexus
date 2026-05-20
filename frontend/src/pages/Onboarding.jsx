@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useNavigate } from "react-router-dom";
 import { api, fmtUSD } from "../lib/api";
 import AgentStatus from "../components/AgentStatus";
-import { Rocket, Building2, ChevronRight, CheckCircle2, Loader2, Sparkles, ArrowUpRight } from "lucide-react";
+import { Rocket, Building2, ChevronRight, CheckCircle2, Loader2, Sparkles, ArrowUpRight, GitBranch } from "lucide-react";
 
 const INDUSTRIES = ["B2B SaaS", "Fintech", "Healthcare", "Cybersecurity", "AI / ML", "DevTools", "Logistics", "Manufacturing", "Energy", "Other"];
 const SIZES = ["1-10", "11-50", "51-200", "201-500", "501-1000", "1000+"];
@@ -66,6 +67,9 @@ export default function Onboarding() {
           const t = await api.get("/targets", { params: { profile_id: p.data.id } });
           if (t.data.targets?.length) {
             setTargets(t.data.targets);
+            const initialPromoted = {};
+            t.data.targets.forEach((tgt) => { if (tgt.promoted_deal_id) initialPromoted[tgt.id] = tgt.promoted_deal_id; });
+            setPromoted(initialPromoted);
             setPhase("results");
           }
         }
@@ -118,6 +122,19 @@ export default function Onboarding() {
     setPhase("form");
     setTargets([]);
     setTerminal([]);
+    setPromoted({});
+  };
+
+  const promote = async (target) => {
+    setPromoting(target.id);
+    try {
+      const r = await api.post(`/targets/${target.id}/promote`);
+      setPromoted((p) => ({ ...p, [target.id]: r.data.deal.id }));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setPromoting(null);
+    }
   };
 
   // ---------- RENDER ----------
@@ -384,8 +401,19 @@ export default function Onboarding() {
                   <span className="nx-label" style={{ fontSize: 9 }}>RECOMMENDED PLAY:</span> {t.recommended_play}
                 </div>
 
-                <button className="nx-btn-ghost w-full justify-center" data-testid={`target-engage-${i}`}>
-                  Engage with agent <ArrowUpRight size={14} />
+                <button
+                  onClick={() => promoted[t.id] ? navigate("/app/pipeline") : promote(t)}
+                  disabled={promoting === t.id}
+                  className={promoted[t.id] ? "nx-btn-primary w-full justify-center" : "nx-btn-ghost w-full justify-center"}
+                  data-testid={`target-promote-${i}`}
+                >
+                  {promoting === t.id ? (
+                    <><Loader2 className="animate-spin" size={14} /> Promoting…</>
+                  ) : promoted[t.id] ? (
+                    <><GitBranch size={14} /> View in pipeline <ArrowUpRight size={14} /></>
+                  ) : (
+                    <><Sparkles size={14} /> Promote to pipeline</>
+                  )}
                 </button>
               </motion.div>
             ))}
