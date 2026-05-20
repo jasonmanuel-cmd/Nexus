@@ -3,73 +3,64 @@
 ## Original Problem Statement
 Build 'Nexus AI' — the first autonomous AI Chief Revenue Officer for mid-market companies.
 
-Core features:
-1. Premium Landing Page — High-converting, enterprise-grade dark-mode bento grid.
-2. Dashboard — Live 'Command Center' visualizing AI-driven revenue activities.
-3. Autonomous Lead Engine — Simulates web-scanning for high-intent signals.
-4. Pipeline Automation — Visual kanban of AI-managed deals across stages.
-5. 'Beta' Interactive Onboarding — User onboards their company → AI generates first 10 high-value targets.
-
-Goal: prototype that feels like a $1M/month product. 2026 design trends (glassmorphism, micro-interactions, AI-agent status indicators).
+Core features: 1) Premium Landing Page, 2) Command Center Dashboard, 3) Autonomous Lead Engine, 4) Pipeline Automation, 5) Beta Interactive Onboarding generating 10 high-value targets. Goal: prototype that feels like a $1M/month product.
 
 ## Architecture
 - **Frontend**: React 19 + React Router 7 + Tailwind + Framer Motion + Recharts
-- **Backend**: FastAPI + Motor (async Mongo) + emergentintegrations (LLM + Stripe + Auth)
-- **DB**: MongoDB collections: `users`, `user_sessions`, `profiles`, `targets`, `deals`, `signals`, `activities`, `payment_transactions`
-- **AI**: Claude Sonnet 4.5 (`claude-sonnet-4-5-20250929`) via Emergent Universal LLM Key
-- **Payments**: Stripe Checkout via `emergentintegrations.payments.stripe` (test key in env)
-- **Auth**: Emergent-managed Google Auth (`auth.emergentagent.com`) — cookie-based sessions, 7-day expiry, Bearer fallback
-- **Theme**: Obsidian black (#050505) + Electric Teal (#00F5D4) + Signal Orange (#FF5500), Instrument Serif + Geist Mono
-
-## Personas
-- Mid-market CRO / VP Sales (primary buyer)
-- RevOps Lead (champion / operator)
-- Founder of $5M–$100M ARR company (decision maker)
+- **Backend**: FastAPI (lifespan handler) + Motor (async Mongo) + emergentintegrations (LLM + Auth) + squareup (Square SDK wrapped with asyncio.to_thread)
+- **AI**: Claude Sonnet 4.5 via Emergent Universal LLM Key
+- **Payments**: **Square Sandbox** Checkout (QuickPay payment links) — replaced Stripe
+- **Auth**: Emergent-managed Google Auth (cookie + Bearer fallback)
+- **Notifications**: Resend (email) + Slack (webhook) — both **MOCKED** behind stubs; persisted to `email_outbox` / `slack_outbox` collections with `mocked:true` until env keys are set
+- **DB**: MongoDB collections: `users`, `user_sessions`, `profiles`, `targets`, `deals`, `signals`, `activities`, `payment_transactions`, `email_outbox`, `slack_outbox`
 
 ## What's Been Implemented
 
-### v1.0 (Feb 20, 2026) — Iteration 1
-- Landing page (bento hero, sponsor marquee, features, agents, pricing, footer)
-- App shell + sidebar nav
-- Command Center dashboard (6 ticker metrics, agent activity feed, agent fleet, Q1 forecast)
-- Lead Engine with scan simulation + signal table
-- Pipeline kanban (5 stages, chevron-advance)
-- Beta Onboarding wizard with Claude Sonnet 4.5 generating 10 high-value targets
-- MongoDB persistence + auto-seed
+### v1.0 — Iteration 1
+Landing + Dashboard + Lead Engine + Pipeline + Onboarding + Claude Sonnet 4.5 target generation + MongoDB seed.
 
-### v2.0 (Feb 20, 2026) — Iteration 2 + 3
-- **Emergent Google Auth** with multi-tenant scoping — all collections scoped by `user_id`; protected `/app/*` routes; demo data auto-seeds per-user on first `/auth/me` hit
-- **Stripe self-serve subscriptions** — Operator $4,800/mo + Scale $18,500/mo, Stripe Checkout via emergentintegrations, polling-based status confirmation, webhook endpoint, `payment_transactions` collection
-- **Recharts on Dashboard** — revenue waterfall (Bar) + agent productivity (Area) with custom dark tooltips
-- **HTML5 drag-and-drop kanban** on Pipeline (with optimistic UI + PATCH backend sync)
-- **Promote target → pipeline deal** — one-click promotion from Beta Onboarding target card; deal auto-created in Prospecting stage with parsed deal size, activity log
-- New pages: `/login`, `/auth/callback`, `/app/subscribe`, `/app/checkout-return`
-- AuthContext + ProtectedRoute components
-- All interactive elements still have `data-testid`
+### v2.0 — Iterations 2-3
+Emergent Google Auth + multi-tenant scoping + Recharts (waterfall + productivity) + HTML5 drag-drop kanban + Promote-target-to-deal + Stripe self-serve checkout.
+
+### v3.0 — Iteration 4
+- **Square Sandbox replaces Stripe** — `/api/payments/checkout/session` creates Square QuickPay link; `/api/payments/checkout/status/{id}` polls Square order; `/api/webhook/square` validates HMAC-SHA256 signature; `/api/payments/subscription` returns state; `/api/payments/subscription/cancel` flips active flag + logs to Slack
+- **Resend email automation (MOCKED stub)** — fires automatically on target-promote and on deal-won; persisted to `email_outbox` with full body
+- **Slack notifications (MOCKED stub)** — fires on target-promote, every pipeline stage change, subscription activate/cancel; persisted to `slack_outbox`
+- **Agent Outbox page** (`/app/outbox`) — inspect every email + Slack the agents have sent; tabs, counts, MOCKED/LIVE badges
+- **FastAPI lifespan handler** replaces deprecated `@on_event`
+- **integrations/** module — `square_client.py` + `notifications.py` cleanly separated from `server.py`
 
 ## Testing
-- **Iteration 1**: 15/15 backend pytest passing
-- **Iteration 2**: 13/14 (2 HIGH bugs found)
-- **Iteration 3** (post-fix): **14/14 backend + 100% frontend flows passing**
+| Iteration | Backend | Frontend | Status |
+|---|---|---|---|
+| 1 | 15/15 | 100% | PASS |
+| 2 | 13/14 (2 HIGH fixed) | 100% | PASS |
+| 3 | 14/14 | 100% | PASS |
+| 4 | **29/29** (15 v3 + 14 v2 regression) | **100%** | **PASS** |
 
 ## Prioritized Backlog
 ### P1
-- Drag-and-drop with multi-card selection
-- Email outreach via Resend integration
-- Slack notifications on deal stage change
+- True Square Subscriptions (Subscriptions API + card-on-file flow) — currently QuickPay = first-month one-time
+- Resend live integration: drop in RESEND_API_KEY and uncomment the live POST in `notifications.py`
+- Slack live integration: drop in SLACK_WEBHOOK_URL and uncomment the httpx POST in `notifications.py`
+- Stripe Customer Portal equivalent for Square (manage card on file, view invoices)
+
 ### P2
-- Custom agent configuration UI
-- Recharts forecast chart + Sankey diagram
-- Stripe customer portal (manage subscription)
-- Convert checkout to actual recurring subscription mode (currently one-time)
-### P3
-- Light theme toggle
+- Split `server.py` (908 lines) into routers (auth/payments/dashboard/leads/pipeline/onboarding/targets/notifications)
+- Resend domain verification + reply-tracking
+- Recharts: Sankey diagram for pipeline flow
 - Mobile-optimized kanban
+- Outbox: filter by kind, search, mark-as-read
+
+### P3
+- Custom agent configuration UI
 - Audit log of agent decisions
-- Split server.py into routers; migrate to FastAPI lifespan
+- Light theme toggle
+- Internationalization
 
 ## Next Tasks
-1. Resend / SendGrid email automation for sequenced outreach
-2. Customer portal for billing self-service
-3. Convert Stripe one-time → recurring subscription
-4. Slack webhook on stage advance
+1. Flip Resend live (drop API key + sender)
+2. Flip Slack live (drop webhook URL)
+3. Implement real Square Subscriptions (recurring) using Subscriptions API
+4. Split `server.py` into routers
+5. Recharts Sankey for pipeline flow
