@@ -11,7 +11,7 @@ import pytest
 import requests
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
-SESSION = "demo_session_token_persistent"
+SESSION = os.environ.get("DEMO_SESSION_TOKEN", "demo_session_token_persistent")
 H = {"Content-Type": "application/json", "Authorization": f"Bearer {SESSION}"}
 
 

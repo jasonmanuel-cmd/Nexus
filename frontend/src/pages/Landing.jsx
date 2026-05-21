@@ -123,7 +123,7 @@ const Hero = () => {
               { agent: "Pipeline-Analyst", action: "Velocity recalibrated", target: "Q1 Pipeline", status: "idle" },
             ].map((a, i) => (
               <motion.div
-                key={i}
+                key={a.agent}
                 initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.3 + i * 0.1 }}
                 className="border-l-2 pl-3 py-1"
                 style={{ borderColor: a.status === "closing" ? "#fafafa" : a.status === "scanning" ? "var(--nx-cyan)" : a.status === "thinking" ? "var(--nx-orange)" : "#52525b" }}
@@ -173,7 +173,7 @@ const Sponsors = () => (
       <div className="overflow-hidden">
         <div className="flex gap-16 nx-marquee w-max">
           {[...SPONSORS, ...SPONSORS].map((s, i) => (
-            <img key={i} src={s} alt="" className="h-10 w-24 object-cover opacity-50 hover:opacity-100 transition grayscale" />
+            <img key={`${s}-${i}`} src={s} alt="" className="h-10 w-24 object-cover opacity-50 hover:opacity-100 transition grayscale" />
           ))}
         </div>
       </div>
@@ -224,7 +224,7 @@ const Features = () => (
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         {FEATURES.map((f, i) => (
           <motion.div
-            key={i}
+            key={f.title}
             initial={{ opacity: 0, y: 30 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.6, delay: i * 0.05 }}
             className={`${f.span} nx-glass nx-card-hover p-8 relative overflow-hidden`}
             data-testid={`feature-${i}`}

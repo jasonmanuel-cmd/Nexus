@@ -11,7 +11,11 @@ export const AuthProvider = ({ children }) => {
     try {
       const r = await api.get("/auth/me");
       setUser(r.data);
-    } catch {
+    } catch (e) {
+      // Unauthenticated or session expired — clear user state
+      if (e?.response?.status && e.response.status !== 401) {
+        console.error("Auth refresh failed:", e);
+      }
       setUser(null);
     } finally {
       setLoading(false);
@@ -28,7 +32,11 @@ export const AuthProvider = ({ children }) => {
   }, [refresh]);
 
   const logout = async () => {
-    try { await api.post("/auth/logout"); } catch {}
+    try {
+      await api.post("/auth/logout");
+    } catch (e) {
+      console.error("Logout request failed:", e);
+    }
     setUser(null);
     window.location.href = "/";
   };

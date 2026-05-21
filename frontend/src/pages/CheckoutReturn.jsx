@@ -22,7 +22,9 @@ export default function CheckoutReturn() {
           setStatus({ phase: "success", data: r.data });
           return true;
         }
-      } catch {}
+      } catch (e) {
+        console.error("Subscription status check failed:", e);
+      }
       return false;
     };
 

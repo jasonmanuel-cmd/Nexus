@@ -80,7 +80,12 @@ export default function Onboarding() {
           setPromoted(initialPromoted);
           setPhase("results");
         }
-      } catch (e) { /* ignore */ }
+      } catch (e) {
+        // No prior profile yet — fresh user, leave form empty
+        if (e?.response?.status && e.response.status !== 404) {
+          console.error("Failed to load onboarding profile:", e);
+        }
+      }
     })();
     return () => { cancelled = true; };
   }, [user]);
@@ -327,7 +332,7 @@ export default function Onboarding() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="md:col-span-2 nx-panel p-6 font-mono text-sm leading-relaxed h-[400px] overflow-y-auto" data-testid="terminal-output">
               {terminal.map((line, i) => (
-                <motion.div key={i} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-zinc-300">
+                <motion.div key={`${i}-${line}`} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-zinc-300">
                   {line}
                 </motion.div>
               ))}

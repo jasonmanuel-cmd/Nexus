@@ -24,7 +24,7 @@ if not BASE_URL:
                 BASE_URL = line.split("=", 1)[1].strip().rstrip("/")
                 break
 
-DEMO_TOKEN = "demo_session_token_persistent"
+DEMO_TOKEN = os.environ.get("DEMO_SESSION_TOKEN", "demo_session_token_persistent")
 def _read_env(key):
     with open("/app/backend/.env") as f:
         for line in f:

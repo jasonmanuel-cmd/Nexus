@@ -52,8 +52,13 @@ const CardModal = ({ pkg, onClose, onSuccess }) => {
       }
     })();
     return () => {
-      try { cardRef.current?.destroy(); } catch {}
+      try {
+        cardRef.current?.destroy();
+      } catch (e) {
+        console.error("Square card cleanup failed:", e);
+      }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSubmit = async () => {

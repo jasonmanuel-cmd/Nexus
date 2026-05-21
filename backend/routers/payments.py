@@ -47,11 +47,14 @@ async def create_checkout(payload: CheckoutCreate, user: User = Depends(get_curr
         raise HTTPException(500, "Square not configured")
     origin = payload.origin_url.rstrip("/")
     redirect_url = f"{origin}/app/checkout-return"
+    link = None
     try:
         link = await sq.create_payment_link(payload.package_id, redirect_url, user.user_id, user.email)
     except Exception as e:
         logging.error(f"Square link create failed: {e}")
         raise HTTPException(502, sanitize_square_error(e))
+    if not link:
+        raise HTTPException(502, "Square payment link creation failed")
     await db.payment_transactions.insert_one({
         "session_id": link["id"],
         "order_id": link.get("order_id"),

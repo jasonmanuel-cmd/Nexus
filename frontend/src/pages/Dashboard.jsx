@@ -33,8 +33,8 @@ const ChartTooltip = ({ active, payload, label }) => {
   return (
     <div className="nx-glass px-3 py-2 text-xs">
       <div className="nx-label mb-1">{label}</div>
-      {payload.map((p, i) => (
-        <div key={i} className="text-zinc-200" style={{ color: p.color }}>
+      {payload.map((p) => (
+        <div key={p.dataKey || p.name} className="text-zinc-200" style={{ color: p.color }}>
           {p.name}: <span className="font-mono">{typeof p.value === "number" ? fmtCompact(p.value) : p.value}</span>
         </div>
       ))}

@@ -402,7 +402,7 @@ Generate 10 high-value prospect targets in strict JSON."""
         except Exception as ex:
             logging.warning(f"Bad target row skipped: {ex}")
 
-    return {"profile_id": profile_id, "count": len(targets), "targets": [t.model_dump() for t in targets]}
+    return {"profile_id": profile_id, "count": len(targets), "targets": [tg.model_dump() for tg in targets]}
 
 
 @api_router.get("/targets")
@@ -567,12 +567,16 @@ async def list_signals(limit: int = 40, user: User = Depends(get_current_user)):
     return {"signals": docs}
 
 
+import secrets as _secrets
+_sysrand = _secrets.SystemRandom()
+
+
 @api_router.post("/leads/scan")
 async def trigger_scan(user: User = Depends(get_current_user)):
     new_signals = []
     sample_pool = SAMPLE_SIGNALS.copy()
-    random.shuffle(sample_pool)
-    for raw in sample_pool[:random.randint(3, 5)]:
+    _sysrand.shuffle(sample_pool)
+    for raw in sample_pool[:_sysrand.randint(3, 5)]:
         s = Signal(user_id=user.user_id, **raw)
         await db.signals.insert_one(dict(s.model_dump()))
         new_signals.append(s.model_dump())
