@@ -23,7 +23,17 @@ Build 'Nexus AI' — first autonomous AI Chief Revenue Officer for mid-market co
 | 3.0 | 4 | Square (replaces Stripe) + MOCKED Resend/Slack + Outbox + lifespan | 29/29 |
 | 4.0 | 5 | Autonomous Reply Loop (Claude buyer-reply + drafted follow-up + Queue) | 10/10 |
 | 5.0 | 6 | Confidence-slider auto-send + LIVE Resend + LIVE Slack + real recurring Square subs (Web SDK) + partial router split | 14/14 |
-| **6.0** | **7** | **Per-deal autonomy cap + sanitized Square errors + finished payments+settings router split** | **16/16** |
+| 6.0 | 7 | Per-deal autonomy cap + sanitized Square errors + finished payments+settings router split | 16/16 |
+| **7.0** | **8** | **Deployer Code-Quality Fixes (P0+P1): undefined vars · empty catches · hook deps · stable React keys · `secrets.SystemRandom` · env-driven test config** | **26/26** |
+
+## v7.0 Details (Feb 21, 2026 — Iteration 8)
+- **server.py:405** — renamed list-comp loop var `t` → `tg` (removed shadow of outer for-loop var; lint clean).
+- **routers/payments.py:50** — defensive `link = None` init + post-try guard `if not link: raise HTTPException(502, ...)`.
+- **Empty catch blocks eliminated** — `AuthContext.jsx` (refresh + logout), `Subscribe.jsx` (Square card destroy), `Onboarding.jsx` (profile fetch), `CheckoutReturn.jsx` (sub check) now log non-401/404 errors via `console.error`.
+- **Stable React keys** — `Landing.jsx` agent feed (`key={a.agent}`), bento stats (`key={s.label}`), sponsor marquee (`key={`${s}-${i}`}`), feature grid (`key={f.title}`); `Dashboard.jsx` ChartTooltip uses `p.dataKey || p.name`; `Onboarding.jsx` terminal uses composite key.
+- **`random` → `secrets.SystemRandom()`** — module-level `_sysrand` in `server.py` (`/api/leads/scan`) cryptographically secure.
+- **Env-driven tests** — `test_nexus_v2.py`, `v3`, `v4`, `v5`, `v6`, `test_nexus_backend.py` all now use `os.environ.get("REACT_APP_BACKEND_URL")` + `os.environ.get("DEMO_SESSION_TOKEN", "demo_session_token_persistent")`. No hardcoded preview URLs or session token literals.
+- **Regression**: 26/26 tests pass in `test_nexus_v7_regression.py` — Auth · Dashboard · Leads (secrets) · Onboarding+Claude · Payments (link init) · Settings · Pipeline · Replies · Scoping.
 
 ## v6.0 Details (Feb 20, 2026 — Iteration 7)
 - **Per-deal autonomy cap** — `auto_send_deal_value_cap` (default $50K). Drafts for deals above the cap stay manual regardless of confidence. Slider in `/app/settings` ($0 → $500K, step $5K) with `$50K`/`$100K`/`$1M` formatting.
@@ -45,12 +55,16 @@ Build 'Nexus AI' — first autonomous AI Chief Revenue Officer for mid-market co
 - User: verify `coaibakersfield.com` DNS on Resend
 - User: confirm Square subscription plan variation IDs
 - Extract remaining routers: replies, notifications, dashboard, leads, pipeline, onboarding, targets, auth
+- Refactor extreme function complexity in `server.py` (`simulate_reply` 144 lines, `generate_targets`)
+- Refactor extreme component complexity in `Onboarding.jsx` (399 lines), `Outbox.jsx`, `Pipeline.jsx`, `Dashboard.jsx`
 
 ### P2
 - Square Customer Portal equivalent (manage card, view invoices)
 - Recharts Sankey for pipeline flow
 - Mobile-optimized kanban + multi-card select drag-drop
 - Resend inbound webhook (real buyer replies parse + draft instead of simulate)
+- Update legacy `test_nexus_backend.py` session fixture to inject Bearer token (or retire — fully duplicated by v3..v7)
+- Update `test_nexus_v3.py::test_promote_inserts_email_and_slack` to drop stale `mocked is True` assertion (Resend is real now)
 
 ### P3
 - Custom agent config UI
@@ -58,10 +72,12 @@ Build 'Nexus AI' — first autonomous AI Chief Revenue Officer for mid-market co
 - Light theme toggle
 - Outbox filters + search
 - Wrap `square_errors.py` `or/and` expression in explicit parens (lint nit)
+- Strip `console.log/error` for production builds
 
 ## Next Tasks
 1. User-side: Resend DNS verification + Square plan ID confirmation
 2. Finish router extraction (replies/notifications/dashboard/leads/pipeline/onboarding/targets/auth)
-3. Square Customer Portal
-4. Real Resend inbound webhook for buyer replies
-5. Recharts Sankey pipeline flow
+3. Refactor `simulate_reply` and `Onboarding.jsx` into smaller pieces (P1 complexity)
+4. Square Customer Portal
+5. Real Resend inbound webhook for buyer replies
+6. Recharts Sankey pipeline flow
