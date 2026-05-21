@@ -91,6 +91,7 @@ class Target(BaseModel):
     signal_strength: int
     decision_maker_name: str
     decision_maker_title: str
+    decision_maker_email: Optional[str] = None
     estimated_deal_size: str
     recommended_play: str
     fit_score: int
@@ -470,7 +471,7 @@ async def promote_target(target_id: str, user: User = Depends(get_current_user))
     )
     await db.activities.insert_one(dict(act.model_dump()))
 
-    # Fire personalized outreach email (MOCKED via stub) + Slack
+    # Fire personalized outreach email (Gmail if connected, else Resend) + Slack
     dm_name = target.get("decision_maker_name", "there")
     dm_first = dm_name.split(" ")[0] if dm_name else "there"
     intro_subject = f"Quick thought on {target['company_name']}'s {target.get('signal_strength', 0)}/100 intent signal"
@@ -481,15 +482,54 @@ async def promote_target(target_id: str, user: User = Depends(get_current_user))
         f"Worth a 15-min look? I'll send 2-3 options.\n\n"
         f"— Nexus AI on behalf of {user.name or user.email}"
     )
-    await send_email(
-        db,
-        to=f"{dm_first.lower()}@{target.get('company_name', 'example').lower().replace(' ', '')}.com",
-        subject=intro_subject,
-        body=intro_body,
-        user_id=user.user_id,
-        kind="promote.intro",
-        meta={"target_id": target_id, "deal_id": deal.id, "decision_maker": dm_name},
-    )
+
+    # Use real email if user has provided one, else use a heuristic guess (fallback)
+    real_email = (target.get("decision_maker_email") or "").strip()
+    to_address = real_email or f"{dm_first.lower()}@{target.get('company_name', 'example').lower().replace(' ', '')}.com"
+
+    # Try Gmail first if connected
+    gmail_sent = False
+    if real_email:
+        gmail_rec = await db.gmail_credentials.find_one({"user_id": user.user_id}, {"_id": 0})
+        if gmail_rec:
+            try:
+                from integrations.gmail_client import get_authed_service, send_reply as _gmail_send
+                service = await get_authed_service(gmail_rec)
+                result = await _gmail_send(service, to=to_address, subject=intro_subject, body=intro_body)
+                gmail_sent = True
+                # Persist outbound record matching the Gmail thread (for inbound poll matching)
+                await db.email_outbox.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": user.user_id,
+                    "to": to_address,
+                    "from": gmail_rec.get("email") or "",
+                    "subject": intro_subject,
+                    "body": intro_body,
+                    "kind": "promote.intro",
+                    "meta": {"target_id": target_id, "deal_id": deal.id, "decision_maker": dm_name},
+                    "status": "delivered",
+                    "mocked": False,
+                    "provider": "gmail",
+                    "provider_id": result.get("id"),
+                    "gmail_thread_id": result.get("threadId"),
+                    "created_at": now_iso(),
+                    "delivered_at": now_iso(),
+                    "error": None,
+                })
+            except Exception as e:
+                logging.warning(f"Gmail send fell through to Resend: {e}")
+
+    if not gmail_sent:
+        await send_email(
+            db,
+            to=to_address,
+            subject=intro_subject,
+            body=intro_body,
+            user_id=user.user_id,
+            kind="promote.intro",
+            meta={"target_id": target_id, "deal_id": deal.id, "decision_maker": dm_name},
+        )
+
     await send_slack(
         db,
         text=f":sparkles: *{target['company_name']}* promoted to pipeline · ${int(deal.value):,} · DM: {dm_name}",
@@ -498,7 +538,27 @@ async def promote_target(target_id: str, user: User = Depends(get_current_user))
         meta={"target_id": target_id, "deal_id": deal.id},
     )
 
-    return {"deal": deal.model_dump(), "already_promoted": False}
+    return {"deal": deal.model_dump(), "already_promoted": False, "sent_via": "gmail" if gmail_sent else "resend", "sent_to": to_address}
+
+
+class TargetUpdate(BaseModel):
+    decision_maker_email: Optional[str] = None
+    decision_maker_name: Optional[str] = None
+    decision_maker_title: Optional[str] = None
+
+
+@api_router.patch("/targets/{target_id}")
+async def update_target(target_id: str, payload: TargetUpdate, user: User = Depends(get_current_user)):
+    """Update editable fields on a target (e.g. paste real decision-maker email after LinkedIn lookup)."""
+    target = await db.targets.find_one({"id": target_id, "user_id": user.user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "Target not found")
+    updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    if not updates:
+        return {"target": target}
+    await db.targets.update_one({"id": target_id, "user_id": user.user_id}, {"$set": updates})
+    updated = await db.targets.find_one({"id": target_id, "user_id": user.user_id}, {"_id": 0})
+    return {"target": updated}
 
 
 # ---------- Dashboard ----------

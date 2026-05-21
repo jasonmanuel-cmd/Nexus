@@ -52,6 +52,8 @@ export default function Onboarding() {
   const [terminal, setTerminal] = useState([]);
   const [targets, setTargets] = useState([]);
   const [error, setError] = useState(null);
+  const [emailDrafts, setEmailDrafts] = useState({}); // {target_id: "real@email.com"}
+  const [sendResult, setSendResult] = useState({});   // {target_id: {via, to}}
 
   // Load latest profile + targets on mount — but only after auth resolves
   useEffect(() => {
@@ -141,8 +143,16 @@ export default function Onboarding() {
   const promote = async (target) => {
     setPromoting(target.id);
     try {
+      // Save decision-maker email first if user has entered one
+      const emailEntered = (emailDrafts[target.id] || "").trim();
+      if (emailEntered && emailEntered !== target.decision_maker_email) {
+        await api.patch(`/targets/${target.id}`, { decision_maker_email: emailEntered });
+      }
       const r = await api.post(`/targets/${target.id}/promote`);
       setPromoted((p) => ({ ...p, [target.id]: r.data.deal.id }));
+      if (r.data.sent_via) {
+        setSendResult((s) => ({ ...s, [target.id]: { via: r.data.sent_via, to: r.data.sent_to } }));
+      }
     } catch (e) {
       console.error(e);
     } finally {
@@ -408,6 +418,22 @@ export default function Onboarding() {
                   <div className="nx-label" style={{ fontSize: 9 }}>DECISION MAKER</div>
                   <div className="text-sm text-zinc-200 mt-1">{t.decision_maker_name}</div>
                   <div className="text-xs text-zinc-500">{t.decision_maker_title}</div>
+                  {!promoted[t.id] && (
+                    <input
+                      type="email"
+                      placeholder={t.decision_maker_email || "Paste real email (from LinkedIn lookup)"}
+                      value={emailDrafts[t.id] ?? (t.decision_maker_email || "")}
+                      onChange={(e) => setEmailDrafts((d) => ({ ...d, [t.id]: e.target.value }))}
+                      className="mt-2 w-full px-2 py-1.5 text-xs bg-transparent border focus:outline-none font-mono"
+                      style={{ borderColor: "var(--nx-border-strong)", color: "#fafafa" }}
+                      data-testid={`target-email-input-${i}`}
+                    />
+                  )}
+                  {sendResult[t.id] && (
+                    <div className="mt-2 text-[10px]" style={{ color: "var(--nx-cyan)" }} data-testid={`target-send-status-${i}`}>
+                      ✓ Sent via {sendResult[t.id].via} → {sendResult[t.id].to}
+                    </div>
+                  )}
                 </div>
 
                 <div className="text-xs text-zinc-400 mb-4">
