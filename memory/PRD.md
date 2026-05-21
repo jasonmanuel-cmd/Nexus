@@ -24,7 +24,23 @@ Build 'Nexus AI' — first autonomous AI Chief Revenue Officer for mid-market co
 | 4.0 | 5 | Autonomous Reply Loop (Claude buyer-reply + drafted follow-up + Queue) | 10/10 |
 | 5.0 | 6 | Confidence-slider auto-send + LIVE Resend + LIVE Slack + real recurring Square subs (Web SDK) + partial router split | 14/14 |
 | 6.0 | 7 | Per-deal autonomy cap + sanitized Square errors + finished payments+settings router split | 16/16 |
-| **7.0** | **8** | **Deployer Code-Quality Fixes (P0+P1): undefined vars · empty catches · hook deps · stable React keys · `secrets.SystemRandom` · env-driven test config** | **26/26** |
+| 7.0 | 8 | Deployer Code-Quality Fixes (P0+P1): undefined vars · empty catches · hook deps · stable React keys · `secrets.SystemRandom` · env-driven test config | 26/26 |
+| **8.0** | **9** | **OUT OF MOCK MODE: Tavily real lead signals · Gmail OAuth + inbox poller · live landing hero stats · waitlist + affiliate (20% rev share) · 7-day trial gating · Square sandbox → PRODUCTION** | **26/26** |
+
+## v8.0 Details (Feb 21, 2026 — Iteration 9) — REAL MONEY MODE
+- **Tavily live web search** — `/api/leads/scan` now invokes `tavily.search(topic=news, time_range=month, search_depth=advanced, max_results=12)` filtered by user's onboarding ICP, then pipes condensed results to Claude Sonnet 4.5 for structured signal extraction. Response includes `live: bool`. Falls back to SAMPLE_SIGNALS if profile missing or Tavily fails. `integrations/tavily_client.py`.
+- **Gmail OAuth inbox poller** — `routers/gmail.py` exposes `/connect`, `/callback` (public), `/status`, `/disconnect`, `/poll`, `/send`. Poll fetches `is:unread newer_than:7d in:inbox`, matches via `threadId` → existing outbound email, generates Claude follow-up draft into `reply_drafts`, marks Gmail message as read. Scopes: `gmail.readonly + gmail.modify + gmail.send + openid + userinfo.email`. Token auto-refresh built in.
+- **Live landing hero stats** — `/api/landing/hero-stats` aggregates real pipeline_value, active_deals, targets_identified, signals_detected_30d, paying_customers. Public endpoint, no auth.
+- **Waitlist** — `/api/landing/waitlist` POST + `/count` GET. Email-deduped, captures referrer (affiliate code), tracks position. UI form on Landing with success state.
+- **Affiliate program** — `/api/landing/affiliate/signup` generates unique slug from name/email; `/{code}` lookup is privacy-safe (no `owner_email` leak via Mongo projection). 20% lifetime rev share configured. UI on Landing.
+- **7-day trial gate** — `routers/billing.py` exposes `/api/billing/trial-status`; trial = 7 days from `users.created_at`. After expiry + no subscription → `/api/leads/scan` and `/api/notifications/email/{id}/simulate-reply` return HTTP 402 with `{detail.error: "trial_expired", upgrade_url: "/app/subscribe"}`. Gate runs BEFORE LLM/Tavily calls. AppShell shows top banner with countdown + upgrade CTA.
+- **Square sandbox → production** — `SQUARE_ENVIRONMENT=production`, fresh production `SQUARE_ACCESS_TOKEN`, `SQUARE_APPLICATION_ID=sq0idp-1CJTgQMcbAUiQw2qPVq7Xw`, `SQUARE_LOCATION_ID=L8W4Z600ATSXF` (auto-fetched from `/v2/locations`), plan variation IDs `Operator=P6foteJBLdWOH4mfQyKfyA` / `Scale=GR3cpbJ4c1KybmF1TRFocg`. Checkout creates real payment links — **real cards charged**.
+
+## How Nexus AI Makes Money (Production-Live)
+- **Operator** $4,800/mo · **Scale** $18,500/mo · **Enterprise** custom (sales@nexus.ai)
+- Revenue model: 10 Operators = $48K MRR · 3 Scale = $55.5K MRR · combined Y1 path to $1M ARR
+- Affiliate engine wired (20% lifetime rev share) — partners can self-onboard from landing
+- 7-day trial → forced upgrade on lock + banner CTA throughout app
 
 ## v7.0 Details (Feb 21, 2026 — Iteration 8)
 - **server.py:405** — renamed list-comp loop var `t` → `tg` (removed shadow of outer for-loop var; lint clean).
