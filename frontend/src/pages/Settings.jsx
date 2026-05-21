@@ -1,24 +1,39 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import AgentStatus from "../components/AgentStatus";
-import { Sliders, Save, Loader2, Sparkles, Info } from "lucide-react";
+import { Sliders, Save, Loader2, Sparkles, Info, Mail, RefreshCw, Unplug, Plug } from "lucide-react";
 
 export default function Settings() {
   const [settings, setSettings] = useState({ auto_send_enabled: false, auto_send_threshold: 85, auto_send_deal_value_cap: 50000 });
   const [stats, setStats] = useState({ pending: 0, sent: 0, received: 0, auto_sent: 0 });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [gmail, setGmail] = useState({ connected: false });
+  const [gmailBusy, setGmailBusy] = useState(false);
+  const [pollResult, setPollResult] = useState(null);
+
+  const loadAll = async () => {
+    const [s, st, gm] = await Promise.all([
+      api.get("/settings"),
+      api.get("/replies/stats"),
+      api.get("/integrations/gmail/status"),
+    ]);
+    setSettings({
+      auto_send_enabled: !!s.data.auto_send_enabled,
+      auto_send_threshold: s.data.auto_send_threshold || 85,
+      auto_send_deal_value_cap: s.data.auto_send_deal_value_cap ?? 50000,
+    });
+    setStats(st.data);
+    setGmail(gm.data);
+  };
 
   useEffect(() => {
-    (async () => {
-      const [s, st] = await Promise.all([api.get("/settings"), api.get("/replies/stats")]);
-      setSettings({
-        auto_send_enabled: !!s.data.auto_send_enabled,
-        auto_send_threshold: s.data.auto_send_threshold || 85,
-        auto_send_deal_value_cap: s.data.auto_send_deal_value_cap ?? 50000,
-      });
-      setStats(st.data);
-    })();
+    loadAll();
+    // If returning from gmail oauth callback (?gmail=connected), poll once + refresh
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("gmail") === "connected") {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
   }, []);
 
   const save = async () => {
@@ -41,6 +56,42 @@ export default function Settings() {
     if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1000) return `$${Math.round(n / 1000)}K`;
     return `$${n}`;
+  };
+
+  const connectGmail = async () => {
+    setGmailBusy(true);
+    try {
+      const r = await api.post("/integrations/gmail/connect");
+      window.location.href = r.data.url;
+    } catch (e) {
+      console.error("Gmail connect failed", e);
+      setGmailBusy(false);
+    }
+  };
+
+  const pollGmail = async () => {
+    setGmailBusy(true);
+    setPollResult(null);
+    try {
+      const r = await api.post("/integrations/gmail/poll");
+      setPollResult(r.data);
+      await loadAll();
+    } catch (e) {
+      console.error("Gmail poll failed", e);
+      setPollResult({ error: e?.response?.data?.detail || "Poll failed" });
+    } finally {
+      setGmailBusy(false);
+    }
+  };
+
+  const disconnectGmail = async () => {
+    setGmailBusy(true);
+    try {
+      await api.post("/integrations/gmail/disconnect");
+      await loadAll();
+    } finally {
+      setGmailBusy(false);
+    }
   };
 
   return (
@@ -176,6 +227,60 @@ export default function Settings() {
             <div className="text-xs text-zinc-500 mt-1">In the queue right now</div>
           </div>
         </div>
+      </div>
+
+      {/* Gmail integration */}
+      <div className="nx-glass p-8 mb-6" data-testid="gmail-panel">
+        <div className="flex items-center gap-3 mb-2">
+          <Mail size={16} color="var(--nx-cyan)" />
+          <div className="nx-label">REAL INBOUND REPLIES · GMAIL</div>
+        </div>
+        <h2 className="font-serif text-3xl mb-2">Connect Gmail to capture real buyer replies.</h2>
+        <p className="text-zinc-400 text-sm mb-6 leading-relaxed">
+          When connected, Nexus polls your inbox, threads incoming replies back to the outbound email we sent, and Claude drafts your follow-up.
+          {" "}
+          <span className="text-zinc-200">No more simulate-reply button</span> — these are real humans replying to you.
+        </p>
+
+        {!gmail.connected ? (
+          <button onClick={connectGmail} disabled={gmailBusy} className="nx-btn-primary" data-testid="connect-gmail-btn">
+            {gmailBusy ? <><Loader2 className="animate-spin" size={14} /> Redirecting…</> : <><Plug size={14} /> Connect Gmail</>}
+          </button>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-3 p-4 border rounded" style={{ borderColor: "rgba(0,245,212,0.35)", background: "rgba(0,245,212,0.04)" }} data-testid="gmail-connected-panel">
+              <div>
+                <div className="text-sm text-zinc-200 flex items-center gap-2">
+                  <AgentStatus status="closing" size="xs" /> Connected as <span className="font-mono">{gmail.email || "—"}</span>
+                </div>
+                {gmail.last_polled_at && <div className="text-xs text-zinc-500 mt-1">Last polled: {new Date(gmail.last_polled_at).toLocaleString()}</div>}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={pollGmail} disabled={gmailBusy} className="nx-btn-ghost" data-testid="poll-gmail-btn">
+                  {gmailBusy ? <><Loader2 className="animate-spin" size={14} /> Polling…</> : <><RefreshCw size={14} /> Poll inbox now</>}
+                </button>
+                <button onClick={disconnectGmail} disabled={gmailBusy} className="nx-btn-ghost" data-testid="disconnect-gmail-btn" style={{ color: "var(--nx-danger)", borderColor: "rgba(255,51,102,0.3)" }}>
+                  <Unplug size={14} /> Disconnect
+                </button>
+              </div>
+            </div>
+
+            {pollResult && (
+              <div className="text-xs p-3 border-l-2 text-zinc-300" data-testid="poll-result" style={{ borderColor: pollResult.error ? "var(--nx-danger)" : "var(--nx-cyan)", background: "rgba(255,255,255,0.02)" }}>
+                {pollResult.error ? (
+                  <span>Error: {pollResult.error}</span>
+                ) : (
+                  <span>
+                    Pulled <span className="text-zinc-100 font-mono">{pollResult.new_replies}</span> new reply
+                    {pollResult.new_replies === 1 ? "" : "ies"} · drafted{" "}
+                    <span className="text-zinc-100 font-mono">{pollResult.drafts_created}</span> follow-up
+                    {pollResult.drafts_created === 1 ? "" : "s"}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

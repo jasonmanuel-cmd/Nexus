@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 9 / Nexus AI v8 — backend validation of the 'out-of-mock-mode' wiring. Wrote /app/backend/tests/test_nexus_v8_new_features.py (26 tests, 26/26 PASS in 32.11s on first run). Verified every endpoint listed in the review_request: (1) Landing public — GET /api/landing/hero-stats returns all 8 expected keys (pipeline_value, active_deals, targets_identified, signals_detected_30d, paying_customers, agents_online, accuracy_pct, as_of); POST /api/landing/waitlist accepts/idempotents/422-rejects; GET /api/landing/waitlist/count public; POST /api/landing/affiliate/signup generates unique code + referral_url + is idempotent on email; GET /api/landing/affiliate/{code} 200s for known and 404s for unknown — and CRITICALLY does NOT leak owner_email or _id in response (verified field-level). (2) Billing /api/billing/trial-status requires auth, returns full 7-field shape for demo user. (3) Trial-gate: spun up a FRESH test user (trial-test-{uuid}) with created_at=now-10d + subscription_active=false + a session token; verified /api/billing/trial-status returns locked=true, then POST /api/leads/scan AND POST /api/notifications/email/{id}/simulate-reply both return HTTP 402 with detail.error='trial_expired'. Teardown cleans up the user, session, and any scoped data. demo-user-001 was NOT mutated. (4) Gmail OAuth: POST /api/integrations/gmail/connect returns {url, state} with url starting with https://accounts.google.com/; GET /api/integrations/gmail/status returns {connected:false} for demo (we proactively wipe gmail_credentials first); POST /api/integrations/gmail/poll returns 400 'Gmail not connected'; all 3 require auth (401 without bearer). (5) Tavily live scan: ensured demo onboarding profile exists (industry='B2B SaaS', icp_description='Mid-market RevOps teams'), then POST /api/leads/scan returned scanned=true, live=true, new_signals=[…] within ~30s. Live path confirmed (no skip-to-fallback). (6) Square production env: GET /api/payments/config returns environment='production'. (7) Regression sweep: /api/auth/me, /api/dashboard/metrics, /api/payments/packages, /api/payments/checkout/session (returned 200 — production Square keys ARE wired to a live plan, no 502 fallback needed), /api/replies/queue, /api/notifications/outbox — all 6 still working.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_nexus_v8_new_features.py",
+    "/app/test_reports/pytest/pytest_v8.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "GOOD: routers/landing.py:156 affiliate_lookup uses Mongo projection {'_id': 0, 'owner_email': 0} — verified at runtime that GET /api/landing/affiliate/{code} response has NO owner_email and NO _id keys. Privacy contract honored.",
+    "GOOD: routers/landing.py:60 waitlist normalises email via .lower() before dedupe lookup AND insert — case-insensitive idempotency works.",
+    "GOOD: routers/billing.py:33 get_trial_status() handles created_at as ISO string OR datetime OR missing (defaults to now), and naïve datetimes are upgraded to UTC. Robust.",
+    "GOOD: routers/billing.py trial gate uses HTTPException(402, detail={'error':'trial_expired', ...}) — FastAPI wraps this under top-level 'detail' key. Verified clients parse via response.json()['detail']['error'].",
+    "GOOD: server.py:580-584 trial gate runs BEFORE the Tavily call in /api/leads/scan, so expired-trial users don't burn LLM/Tavily credits. Same pattern at server.py:771 simulate-reply.",
+    "GOOD: routers/gmail.py:170 /status projection excludes access_token, refresh_token, client_secret — prevents token leaks via the status probe. Verified.",
+    "GOOD: server.py:635 /api/leads/scan response includes explicit boolean `live` flag — gives the frontend a clean signal of whether Tavily fired or fallback was used.",
+    "MINOR (informational, not a bug): routers/landing.py:155 affiliate_lookup applies .lower() to incoming code but the signup at line 128 also lowercases via _slugify(); however an attacker passing a MIXED-CASE existing code will still match because of the .lower() at lookup. Consistent.",
+    "MINOR (informational): /api/landing/hero-stats fallback returns pipeline_value=4_200_000 when DB has no deals. This is a deliberate landing-page UX choice (avoid showing $0). Not a security/data issue."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_nexus_v8_new_features.py (NEW — 26 tests, 26/26 PASS in 32s)"
+  ],
+  "success_rate": {
+    "backend": "100% — 26/26 PASS on first run. LandingHeroStats 1/1, LandingWaitlist 4/4, LandingAffiliate 4/4, BillingTrialStatus 2/2, TrialGate 3/3, Gmail 4/4, LeadsScanLive 1/1 (live=true confirmed, no fallback skip), SquareEnv 1/1, Regression 6/6 (incl. checkout/session 200 with production Square keys).",
+    "frontend": "SKIPPED per review_request (backend only; frontend smoke screenshot already passed)."
+  },
+  "test_credentials": "Demo session: demo_session_token_persistent (Bearer header) — /app/memory/test_credentials.md.",
+  "seed_data_creation": "TestLandingWaitlist inserted 1 TEST_wait_*@example.com waitlist row. TestLandingAffiliate inserted 1 TEST_aff_*@example.com affiliate row (left in DB for future regression — they are test-prefixed and harmless). TestTrialGate created a fresh user trial-test-{uuid}+session+(possibly signals/activities) and CLEANED UP fully in teardown_class (users, user_sessions, signals, activities, email_outbox scoped to that user_id). TestLeadsScanLive may have inserted an onboarding profile (only if one didn't exist) and ~3-5 signals for demo-user-001 (these are user-scoped and harmless). demo-user-001's created_at was NOT mutated.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_nexus_v8_new_features.py is the canonical regression for the out-of-mock-mode wiring. Key invariants: (a) FastAPI HTTPException(402, detail={...}) places the dict under top-level 'detail' — parse response.json()['detail']['error']; (b) /api/landing/affiliate/{code} MUST NOT leak owner_email — assert 'owner_email' not in response; (c) trial-gate test pattern: create a fresh user with old created_at (don't mutate demo-user-001!), tear down at end; (d) /api/integrations/gmail/poll requires gmail_credentials to be PRESENT — if you need 400 path, proactively wipe the collection first (the test does this); (e) /api/leads/scan now triggers Tavily live IFF profile exists with industry+icp_description (response.live=true); without profile or on failure, live=false + sample fallback. SQUARE_ENVIRONMENT=production is live and checkout/session returns 200 (not 502). All historical v7 regression tests still pass alongside (run `python -m pytest backend/tests/test_nexus_v7_regression.py backend/tests/test_nexus_v8_new_features.py`).",
+  "rca of the issue": "No issues found. All 14 review-request items (8 new endpoints + trial-gate on 2 endpoints + 6 regression endpoints + Square env flip) verified PASS. The wiring is clean: trial gate fires before paid-LLM/Tavily calls; affiliate lookup protects PII via Mongo projection; Gmail status hides tokens via projection; live=true flag in scan response is honest (we measured the actual Tavily code path firing within ~30s)."
+}

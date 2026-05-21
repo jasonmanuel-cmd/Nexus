@@ -573,23 +573,66 @@ _sysrand = _secrets.SystemRandom()
 
 @api_router.post("/leads/scan")
 async def trigger_scan(user: User = Depends(get_current_user)):
-    new_signals = []
-    sample_pool = SAMPLE_SIGNALS.copy()
-    _sysrand.shuffle(sample_pool)
-    for raw in sample_pool[:_sysrand.randint(3, 5)]:
-        s = Signal(user_id=user.user_id, **raw)
-        await db.signals.insert_one(dict(s.model_dump()))
-        new_signals.append(s.model_dump())
+    """Real-time lead scan via Tavily + Claude (replaces SAMPLE_SIGNALS).
 
+    Falls back to sample pool if Tavily fails OR no profile exists yet.
+    """
+    # Trial gate: 402 if expired + no subscription
+    from routers.billing import get_trial_status
+    ts = await get_trial_status(user.user_id)
+    if ts["locked"]:
+        raise HTTPException(402, detail={"error": "trial_expired", "message": "Your trial has ended.", "upgrade_url": "/app/subscribe"})
+
+    from integrations.tavily_client import scan_real_signals
+
+    # Pull the latest onboarding profile for ICP context
+    profile = await db.profiles.find_one(
+        {"user_id": user.user_id},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+
+    new_signals: List[dict] = []
+    used_fallback = False
+
+    if profile and profile.get("industry") and profile.get("icp_description"):
+        try:
+            real = await scan_real_signals(
+                industry=profile["industry"],
+                icp_description=profile["icp_description"],
+                geographies=profile.get("target_geographies") or [],
+                emergent_llm_key=EMERGENT_LLM_KEY,
+                session_id=f"scan-{user.user_id}-{int(datetime.now(timezone.utc).timestamp())}",
+            )
+            for raw in real:
+                s = Signal(user_id=user.user_id, **raw)
+                await db.signals.insert_one(dict(s.model_dump()))
+                new_signals.append(s.model_dump())
+        except Exception as ex:
+            logging.warning(f"Tavily scan failed, falling back to sample pool: {ex}")
+            used_fallback = True
+    else:
+        used_fallback = True
+
+    if not new_signals:
+        # Fallback for fresh users (no profile yet) or Tavily failures
+        sample_pool = SAMPLE_SIGNALS.copy()
+        _sysrand.shuffle(sample_pool)
+        for raw in sample_pool[:_sysrand.randint(3, 5)]:
+            s = Signal(user_id=user.user_id, **raw)
+            await db.signals.insert_one(dict(s.model_dump()))
+            new_signals.append(s.model_dump())
+
+    source_label = "12,400 sources via Tavily live web" if not used_fallback else "sample seed (complete onboarding for live scan)"
     act = Activity(
         user_id=user.user_id,
         agent="LeadScout-7",
-        action="Web scan completed across 12,400 sources",
+        action=f"Web scan completed across {source_label}",
         target=f"{len(new_signals)} new high-intent signals captured",
         status="scanning",
     )
     await db.activities.insert_one(dict(act.model_dump()))
-    return {"scanned": True, "new_signals": new_signals}
+    return {"scanned": True, "live": not used_fallback, "new_signals": new_signals}
 
 
 # ---------- Pipeline ----------
@@ -728,6 +771,12 @@ class ReplyDraft(BaseModel):
 @api_router.post("/notifications/email/{email_id}/simulate-reply")
 async def simulate_reply(email_id: str, user: User = Depends(get_current_user)):
     """Generate a plausible buyer reply via Claude + an AI-drafted follow-up. Stores both."""
+    # Trial gate
+    from routers.billing import get_trial_status
+    ts = await get_trial_status(user.user_id)
+    if ts["locked"]:
+        raise HTTPException(402, detail={"error": "trial_expired", "message": "Your trial has ended.", "upgrade_url": "/app/subscribe"})
+
     email_doc = await db.email_outbox.find_one({"id": email_id, "user_id": user.user_id}, {"_id": 0})
     if not email_doc:
         raise HTTPException(404, "Email not found")
@@ -1020,8 +1069,15 @@ app.include_router(api_router)
 # Modular routers (extracted from server.py for maintainability)
 from routers.settings import router as settings_router
 from routers.payments import router as payments_router
+from routers.gmail import router as gmail_router, public_router as gmail_public_router
+from routers.landing import router as landing_router
+from routers.billing import router as billing_router
 app.include_router(settings_router)
 app.include_router(payments_router)
+app.include_router(gmail_router, prefix="/api")
+app.include_router(gmail_public_router, prefix="/api")
+app.include_router(landing_router, prefix="/api")
+app.include_router(billing_router)
 
 app.add_middleware(
     CORSMiddleware,

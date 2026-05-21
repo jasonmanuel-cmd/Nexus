@@ -1,7 +1,8 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { Activity, Radar, GitBranch, Rocket, ChevronLeft, Cpu, CreditCard, LogOut, Inbox, MessageSquare, Sliders } from "lucide-react";
+import { Activity, Radar, GitBranch, Rocket, ChevronLeft, Cpu, CreditCard, LogOut, Inbox, MessageSquare, Sliders, Clock, ShieldAlert } from "lucide-react";
 import { useAuth } from "../lib/AuthContext";
+import { api } from "../lib/api";
 
 const NAV = [
   { to: "/app/dashboard",   label: "COMMAND CENTER", icon: Activity, testid: "nav-dashboard" },
@@ -17,6 +18,18 @@ const NAV = [
 export const AppShell = ({ children }) => {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
+  const [trial, setTrial] = useState(null);
+
+  useEffect(() => {
+    if (!user) return;
+    api.get("/billing/trial-status")
+      .then((r) => setTrial(r.data))
+      .catch((e) => console.error("trial status failed", e));
+  }, [user]);
+
+  const showBanner = trial && !trial.subscription_active && (trial.trial_active || trial.locked);
+  const locked = trial?.locked;
+
   return (
     <div className="min-h-screen relative" style={{ background: "var(--nx-bg)" }}>
       <div className="nx-noise" />
@@ -99,7 +112,35 @@ export const AppShell = ({ children }) => {
           </div>
         </aside>
 
-        <main className="flex-1 min-h-screen ml-[240px] lg:ml-0">{children}</main>
+        <main className="flex-1 min-h-screen ml-[240px] lg:ml-0">
+          {showBanner && (
+            <div
+              className="px-6 lg:px-10 py-3 border-b flex items-center justify-between gap-4 flex-wrap"
+              style={{
+                background: locked ? "rgba(255,51,102,0.08)" : "rgba(0,245,212,0.04)",
+                borderColor: locked ? "rgba(255,51,102,0.3)" : "rgba(0,245,212,0.25)",
+              }}
+              data-testid="trial-banner"
+            >
+              <div className="flex items-center gap-3 text-xs">
+                {locked ? (
+                  <ShieldAlert size={14} color="var(--nx-danger)" />
+                ) : (
+                  <Clock size={14} color="var(--nx-cyan)" />
+                )}
+                <span className="text-zinc-200">
+                  {locked
+                    ? "Your 7-day trial has ended. Subscribe to keep your agents running."
+                    : `Trial active · ${trial.days_remaining} day${trial.days_remaining === 1 ? "" : "s"} remaining`}
+                </span>
+              </div>
+              <button onClick={() => navigate("/app/subscribe")} className="nx-btn-primary" data-testid="trial-cta">
+                {locked ? "Reactivate now" : "Upgrade early"}
+              </button>
+            </div>
+          )}
+          {children}
+        </main>
       </div>
     </div>
   );

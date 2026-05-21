@@ -1,9 +1,10 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowUpRight, Cpu, Radar, GitBranch, Rocket, Zap, Brain, ShieldCheck, Activity, Sparkles, TrendingUp, Workflow } from "lucide-react";
+import { ArrowUpRight, Cpu, Radar, GitBranch, Rocket, Zap, Brain, ShieldCheck, Activity, Sparkles, TrendingUp, Workflow, Mail, Users, CheckCircle2, Loader2, Copy } from "lucide-react";
 import AgentStatus from "../components/AgentStatus";
 import { useAuth } from "../lib/AuthContext";
+import { api, fmtCompact } from "../lib/api";
 
 const HERO_BG = "https://images.unsplash.com/photo-1772862991841-f0e3e1502d7b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMGRhcmslMjB0ZWNobm9sb2d5JTIwbmV0d29yayUyMG5vZGVzfGVufDB8fHx8MTc3OTI2ODM0NXww&ixlib=rb-4.1.0&q=85";
 
@@ -59,6 +60,25 @@ const Hero = () => {
   const { user } = useAuth();
   const startHref = user ? "/app/onboarding" : "/login";
   const dashHref = user ? "/app/dashboard" : "/login";
+  const [stats, setStats] = useState(null);
+  useEffect(() => {
+    api.get("/landing/hero-stats")
+      .then((r) => setStats(r.data))
+      .catch((e) => console.error("hero stats load failed", e));
+  }, []);
+  const heroPanels = stats
+    ? [
+        { label: "PIPELINE", value: `$${fmtCompact(stats.pipeline_value)}`, sub: `${stats.active_deals} active deals`, icon: TrendingUp },
+        { label: "TARGETS / 30D", value: fmtCompact(stats.targets_identified), sub: "ICP-matched, ranked", icon: Activity },
+        { label: "ACCURACY", value: `${stats.accuracy_pct}%`, sub: "intent-signal precision", icon: ShieldCheck },
+        { label: "AGENTS", value: String(stats.agents_online), sub: "always on", icon: Brain },
+      ]
+    : [
+        { label: "PIPELINE", value: "$4.2M", sub: "loading…", icon: TrendingUp },
+        { label: "TARGETS / 30D", value: "—", sub: "loading…", icon: Activity },
+        { label: "ACCURACY", value: "94.2%", sub: "loading…", icon: ShieldCheck },
+        { label: "AGENTS", value: "7", sub: "always on", icon: Brain },
+      ];
   return (
   <section className="relative pt-32 pb-20 overflow-hidden">
     <div className="absolute inset-0 -z-10">
@@ -140,14 +160,9 @@ const Hero = () => {
         </motion.div>
 
         {/* Bento small panels */}
-        {[
-          { label: "PIPELINE / 90D", value: "$4.2M", sub: "+38% MoM", icon: TrendingUp },
-          { label: "MEETINGS / WEEK", value: "18", sub: "auto-booked", icon: Activity },
-          { label: "ACCURACY", value: "94.2%", sub: "intent-signal precision", icon: ShieldCheck },
-          { label: "AGENTS", value: "7", sub: "always on", icon: Brain },
-        ].map((s, i) => (
+        {heroPanels.map((s, i) => (
           <motion.div
-            key={i}
+            key={s.label}
             initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 + i * 0.08 }}
             className="lg:col-span-3 nx-glass nx-card-hover p-5"
             data-testid={`hero-stat-${i}`}
@@ -394,6 +409,238 @@ const Footer = () => (
   </footer>
 );
 
+const Waitlist = () => {
+  const [email, setEmail] = useState("");
+  const [company, setCompany] = useState("");
+  const [role, setRole] = useState("");
+  const [status, setStatus] = useState({ phase: "idle", message: "" });
+  const [count, setCount] = useState(null);
+
+  useEffect(() => {
+    api.get("/landing/waitlist/count").then((r) => setCount(r.data.count)).catch(() => {});
+  }, []);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!email) return;
+    setStatus({ phase: "loading" });
+    try {
+      const ref = new URLSearchParams(window.location.search).get("ref");
+      const r = await api.post("/landing/waitlist", { email, company, role, referrer: ref });
+      setStatus({
+        phase: "success",
+        message: r.data.already_joined
+          ? `You're already on the list — position #${r.data.position}.`
+          : `You're in. Position #${r.data.position}.`,
+      });
+      if (!r.data.already_joined) setCount((c) => (c || 0) + 1);
+    } catch (err) {
+      setStatus({ phase: "error", message: err?.response?.data?.detail || "Could not join waitlist" });
+    }
+  };
+
+  return (
+    <section id="beta" className="py-28 relative" data-testid="waitlist-section">
+      <div className="absolute inset-0 -z-10">
+        <div className="absolute inset-0" style={{ background: "radial-gradient(900px 500px at 20% 50%, rgba(0,245,212,0.06), transparent 60%)" }} />
+      </div>
+      <div className="max-w-6xl mx-auto px-6 lg:px-10 grid grid-cols-1 lg:grid-cols-2 gap-10 items-start">
+        <div>
+          <div className="nx-label mb-4">[ BETA · LIMITED ACCESS ]</div>
+          <h2 className="font-serif text-4xl sm:text-5xl lg:text-6xl tracking-tight leading-[1.02]">
+            Want Nexus first?<br/>
+            <span className="italic" style={{ color: "var(--nx-cyan)" }}>Join the closed beta.</span>
+          </h2>
+          <p className="mt-6 text-zinc-400 leading-relaxed max-w-lg">
+            We're onboarding 50 mid-market revenue teams per month. The waitlist runs first-come, first-deployed.
+            {count !== null && (
+              <span className="text-zinc-200"> {count}+ leaders already in queue.</span>
+            )}
+          </p>
+          <div className="mt-8 flex items-center gap-4 text-xs text-zinc-500">
+            <span className="flex items-center gap-2"><Users size={12} color="var(--nx-cyan)" /> Founders & CROs</span>
+            <span className="flex items-center gap-2"><ShieldCheck size={12} color="var(--nx-cyan)" /> SOC2 · GDPR</span>
+            <span className="flex items-center gap-2"><Sparkles size={12} color="var(--nx-cyan)" /> 7-day free trial</span>
+          </div>
+        </div>
+
+        <form onSubmit={submit} className="nx-glass p-8" data-testid="waitlist-form">
+          {status.phase === "success" ? (
+            <div className="text-center py-8" data-testid="waitlist-success">
+              <CheckCircle2 className="mx-auto mb-4" size={36} color="var(--nx-cyan)" />
+              <div className="font-serif text-2xl mb-2">{status.message}</div>
+              <div className="text-zinc-500 text-sm">We'll email you when your slot opens.</div>
+            </div>
+          ) : (
+            <>
+              <div className="nx-label mb-4">RESERVE YOUR SEAT</div>
+              <div className="space-y-3">
+                <input
+                  type="email"
+                  required
+                  placeholder="work@yourcompany.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full px-4 py-3 bg-transparent border text-sm focus:outline-none"
+                  style={{ borderColor: "var(--nx-border-strong)", color: "#fafafa" }}
+                  data-testid="waitlist-email"
+                />
+                <input
+                  type="text"
+                  placeholder="Company (optional)"
+                  value={company}
+                  onChange={(e) => setCompany(e.target.value)}
+                  className="w-full px-4 py-3 bg-transparent border text-sm focus:outline-none"
+                  style={{ borderColor: "var(--nx-border-strong)", color: "#fafafa" }}
+                  data-testid="waitlist-company"
+                />
+                <input
+                  type="text"
+                  placeholder="Your role (CRO, VP Sales, RevOps…)"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                  className="w-full px-4 py-3 bg-transparent border text-sm focus:outline-none"
+                  style={{ borderColor: "var(--nx-border-strong)", color: "#fafafa" }}
+                  data-testid="waitlist-role"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={status.phase === "loading"}
+                className="nx-btn-primary w-full justify-center mt-5"
+                data-testid="waitlist-submit"
+              >
+                {status.phase === "loading"
+                  ? <><Loader2 className="animate-spin" size={14} /> Reserving…</>
+                  : <><Rocket size={14} /> Reserve my seat</>}
+              </button>
+              {status.phase === "error" && (
+                <div className="text-xs mt-3" style={{ color: "var(--nx-danger)" }} data-testid="waitlist-error">
+                  {status.message}
+                </div>
+              )}
+              <div className="text-[10px] text-zinc-600 mt-4 text-center">
+                We only email you about Nexus. No marketing list resale, ever.
+              </div>
+            </>
+          )}
+        </form>
+      </div>
+    </section>
+  );
+};
+
+const Affiliate = () => {
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!email) return;
+    setBusy(true);
+    try {
+      const r = await api.post("/landing/affiliate/signup", { email, name });
+      setResult(r.data);
+    } catch (err) {
+      setResult({ error: err?.response?.data?.detail || "Signup failed" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const fullRef = result?.code
+    ? `${window.location.origin}/?ref=${result.code}`
+    : "";
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(fullRef);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error("Clipboard write failed:", e);
+    }
+  };
+
+  return (
+    <section id="partners" className="py-28 relative" data-testid="affiliate-section" style={{ background: "rgba(255,255,255,0.015)" }}>
+      <div className="max-w-6xl mx-auto px-6 lg:px-10 grid grid-cols-1 lg:grid-cols-5 gap-10 items-center">
+        <div className="lg:col-span-3">
+          <div className="nx-label mb-4">[ PARTNER PROGRAM · 20% REV SHARE ]</div>
+          <h2 className="font-serif text-4xl sm:text-5xl tracking-tight leading-[1.04]">
+            RevOps consultants & GTM advisors.<br/>
+            <span style={{ color: "var(--nx-cyan)" }}>Refer Nexus. Get paid for life.</span>
+          </h2>
+          <p className="mt-6 text-zinc-400 leading-relaxed">
+            Every customer you refer pays Nexus $4,800–$18,500 per month.
+            You keep <span className="text-zinc-200">20% recurring</span> — that's up to <span className="text-zinc-200">$44,400/year</span> per Scale-tier customer.
+            We'll send you a personal referral link in under 30 seconds.
+          </p>
+          <div className="mt-6 flex flex-wrap items-center gap-6 text-xs text-zinc-500">
+            <span className="flex items-center gap-2"><CheckCircle2 size={12} color="var(--nx-cyan)" /> Lifetime commission</span>
+            <span className="flex items-center gap-2"><CheckCircle2 size={12} color="var(--nx-cyan)" /> Monthly payouts</span>
+            <span className="flex items-center gap-2"><CheckCircle2 size={12} color="var(--nx-cyan)" /> No cap, no minimums</span>
+          </div>
+        </div>
+
+        <form onSubmit={submit} className="lg:col-span-2 nx-glass p-7" data-testid="affiliate-form">
+          {result?.code ? (
+            <div data-testid="affiliate-success">
+              <div className="nx-label mb-3">YOUR REFERRAL LINK</div>
+              <div className="flex items-center gap-2 p-3 border" style={{ borderColor: "var(--nx-border-strong)" }}>
+                <code className="text-xs text-zinc-200 truncate flex-1" data-testid="affiliate-link">{fullRef}</code>
+                <button type="button" onClick={copy} className="nx-btn-ghost" data-testid="affiliate-copy">
+                  {copied ? <CheckCircle2 size={12} color="var(--nx-cyan)" /> : <Copy size={12} />} {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <div className="text-xs text-zinc-500 mt-3">
+                Code: <span className="font-mono text-zinc-300">{result.code}</span> · Referrals so far: <span className="font-mono text-zinc-300">{result.referrals_count}</span>
+              </div>
+              <div className="text-[10px] text-zinc-600 mt-4">
+                Add <span className="font-mono">?ref={result.code}</span> to any Nexus URL to attribute the visitor to you.
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="nx-label mb-4">BECOME A PARTNER</div>
+              <div className="space-y-3">
+                <input
+                  type="text"
+                  placeholder="Your name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full px-4 py-3 bg-transparent border text-sm focus:outline-none"
+                  style={{ borderColor: "var(--nx-border-strong)", color: "#fafafa" }}
+                  data-testid="affiliate-name"
+                />
+                <input
+                  type="email"
+                  required
+                  placeholder="Payout email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full px-4 py-3 bg-transparent border text-sm focus:outline-none"
+                  style={{ borderColor: "var(--nx-border-strong)", color: "#fafafa" }}
+                  data-testid="affiliate-email"
+                />
+              </div>
+              <button type="submit" disabled={busy} className="nx-btn-primary w-full justify-center mt-4" data-testid="affiliate-submit">
+                {busy ? <><Loader2 className="animate-spin" size={14} /> Generating…</> : <><Sparkles size={14} /> Generate my referral link</>}
+              </button>
+              {result?.error && (
+                <div className="text-xs mt-3" style={{ color: "var(--nx-danger)" }}>{result.error}</div>
+              )}
+            </>
+          )}
+        </form>
+      </div>
+    </section>
+  );
+};
+
 export default function Landing() {
   return (
     <div className="relative" data-testid="landing-page">
@@ -404,6 +651,8 @@ export default function Landing() {
       <Features />
       <Agents />
       <Pricing />
+      <Waitlist />
+      <Affiliate />
       <FinalCTA />
       <Footer />
     </div>
