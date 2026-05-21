@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import AgentStatus from "../components/AgentStatus";
-import { Sliders, Save, Loader2, Sparkles, Info, Mail, RefreshCw, Unplug, Plug } from "lucide-react";
+import { Sliders, Save, Loader2, Sparkles, Info, Mail, RefreshCw, Unplug, Plug, Key, Search, Trash2 } from "lucide-react";
 
 export default function Settings() {
   const [settings, setSettings] = useState({ auto_send_enabled: false, auto_send_threshold: 85, auto_send_deal_value_cap: 50000 });
@@ -11,12 +11,19 @@ export default function Settings() {
   const [gmail, setGmail] = useState({ connected: false });
   const [gmailBusy, setGmailBusy] = useState(false);
   const [pollResult, setPollResult] = useState(null);
+  const [keys, setKeys] = useState({ hunter: { connected: false, mask: "" }, resend: { connected: false, mask: "", from_email: "" } });
+  const [hunterDraft, setHunterDraft] = useState("");
+  const [resendKeyDraft, setResendKeyDraft] = useState("");
+  const [resendFromDraft, setResendFromDraft] = useState("");
+  const [keysBusy, setKeysBusy] = useState(false);
+  const [keysMsg, setKeysMsg] = useState("");
 
   const loadAll = async () => {
-    const [s, st, gm] = await Promise.all([
+    const [s, st, gm, kk] = await Promise.all([
       api.get("/settings"),
       api.get("/replies/stats"),
       api.get("/integrations/gmail/status"),
+      api.get("/integrations/keys"),
     ]);
     setSettings({
       auto_send_enabled: !!s.data.auto_send_enabled,
@@ -25,6 +32,8 @@ export default function Settings() {
     });
     setStats(st.data);
     setGmail(gm.data);
+    setKeys(kk.data);
+    setResendFromDraft(kk.data?.resend?.from_email || "");
   };
 
   useEffect(() => {
@@ -91,6 +100,37 @@ export default function Settings() {
       await loadAll();
     } finally {
       setGmailBusy(false);
+    }
+  };
+
+  const saveKey = async (provider) => {
+    setKeysBusy(true);
+    setKeysMsg("");
+    try {
+      const body = provider === "hunter"
+        ? { hunter_api_key: hunterDraft.trim() }
+        : { resend_api_key: resendKeyDraft.trim(), resend_from_email: resendFromDraft.trim() || undefined };
+      await api.put("/integrations/keys", body);
+      setHunterDraft("");
+      setResendKeyDraft("");
+      setKeysMsg(`Saved ${provider} key.`);
+      await loadAll();
+      setTimeout(() => setKeysMsg(""), 2400);
+    } catch (e) {
+      console.error(e);
+      setKeysMsg(e?.response?.data?.detail || "Save failed");
+    } finally {
+      setKeysBusy(false);
+    }
+  };
+
+  const removeKey = async (provider) => {
+    setKeysBusy(true);
+    try {
+      await api.delete(`/integrations/keys/${provider}`);
+      await loadAll();
+    } finally {
+      setKeysBusy(false);
     }
   };
 
@@ -279,6 +319,123 @@ export default function Settings() {
                 )}
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* BYOK panel: Hunter.io + Resend per-user API keys */}
+      <div className="nx-glass p-8 mb-6" data-testid="byok-panel">
+        <div className="flex items-center gap-3 mb-2">
+          <Key size={16} color="var(--nx-cyan)" />
+          <div className="nx-label">BRING YOUR OWN KEYS</div>
+        </div>
+        <h2 className="font-serif text-3xl mb-2">Plug in your own Hunter & Resend.</h2>
+        <p className="text-zinc-400 text-sm mb-6 leading-relaxed">
+          Your keys stay on your account. Nexus uses Hunter to auto-find decision-maker emails when you promote a target,
+          and Resend to send from your verified domain instead of ours.
+        </p>
+
+        {/* Hunter row */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 mb-4 items-start" data-testid="byok-hunter-row">
+          <div className="lg:col-span-3">
+            <div className="nx-label">HUNTER.IO</div>
+            <div className="text-xs text-zinc-500 mt-1">Verified email discovery</div>
+            <a href="https://hunter.io/api-keys" target="_blank" rel="noopener noreferrer" className="text-xs underline mt-2 inline-block" style={{ color: "var(--nx-cyan)" }}>Get an API key →</a>
+          </div>
+          <div className="lg:col-span-9">
+            {keys.hunter?.connected ? (
+              <div className="flex items-center justify-between gap-3 p-3 border" style={{ borderColor: "rgba(0,245,212,0.3)" }} data-testid="hunter-connected">
+                <span className="text-sm text-zinc-200 flex items-center gap-2">
+                  <Search size={12} color="var(--nx-cyan)" /> Connected · <span className="font-mono text-xs text-zinc-400">{keys.hunter.mask}</span>
+                </span>
+                <button onClick={() => removeKey("hunter")} disabled={keysBusy} className="nx-btn-ghost" style={{ color: "var(--nx-danger)" }} data-testid="hunter-disconnect">
+                  <Trash2 size={12} /> Remove
+                </button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={hunterDraft}
+                  onChange={(e) => setHunterDraft(e.target.value)}
+                  placeholder="Paste your Hunter.io API key"
+                  className="flex-1 px-3 py-2 text-sm bg-transparent border focus:outline-none font-mono"
+                  style={{ borderColor: "var(--nx-border-strong)", color: "#fafafa" }}
+                  data-testid="hunter-key-input"
+                />
+                <button onClick={() => saveKey("hunter")} disabled={keysBusy || !hunterDraft.trim()} className="nx-btn-primary" data-testid="hunter-save">
+                  {keysBusy ? <Loader2 className="animate-spin" size={12} /> : <Save size={12} />} Save
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Resend row */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start" data-testid="byok-resend-row">
+          <div className="lg:col-span-3">
+            <div className="nx-label">RESEND</div>
+            <div className="text-xs text-zinc-500 mt-1">Send from your domain</div>
+            <a href="https://resend.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-xs underline mt-2 inline-block" style={{ color: "var(--nx-cyan)" }}>Get an API key →</a>
+          </div>
+          <div className="lg:col-span-9">
+            {keys.resend?.connected ? (
+              <div className="flex items-center justify-between gap-3 p-3 border" style={{ borderColor: "rgba(0,245,212,0.3)" }} data-testid="resend-connected">
+                <div className="text-sm text-zinc-200">
+                  <span className="flex items-center gap-2">
+                    <Mail size={12} color="var(--nx-cyan)" /> Connected · <span className="font-mono text-xs text-zinc-400">{keys.resend.mask}</span>
+                  </span>
+                  {keys.resend.from_email && (
+                    <div className="text-xs text-zinc-500 mt-1">From: <span className="font-mono">{keys.resend.from_email}</span></div>
+                  )}
+                </div>
+                <button onClick={() => removeKey("resend")} disabled={keysBusy} className="nx-btn-ghost" style={{ color: "var(--nx-danger)" }} data-testid="resend-disconnect">
+                  <Trash2 size={12} /> Remove
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <input
+                  type="password"
+                  value={resendKeyDraft}
+                  onChange={(e) => setResendKeyDraft(e.target.value)}
+                  placeholder="re_live_…"
+                  className="w-full px-3 py-2 text-sm bg-transparent border focus:outline-none font-mono"
+                  style={{ borderColor: "var(--nx-border-strong)", color: "#fafafa" }}
+                  data-testid="resend-key-input"
+                />
+                <div className="flex gap-2">
+                  <input
+                    type="email"
+                    value={resendFromDraft}
+                    onChange={(e) => setResendFromDraft(e.target.value)}
+                    placeholder="nexus@yourdomain.com (must be Resend-verified)"
+                    className="flex-1 px-3 py-2 text-sm bg-transparent border focus:outline-none"
+                    style={{ borderColor: "var(--nx-border-strong)", color: "#fafafa" }}
+                    data-testid="resend-from-input"
+                  />
+                  <button onClick={() => saveKey("resend")} disabled={keysBusy || !resendKeyDraft.trim()} className="nx-btn-primary" data-testid="resend-save">
+                    {keysBusy ? <Loader2 className="animate-spin" size={12} /> : <Save size={12} />} Save
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Inbound webhook URL — shown when Resend is connected so user can wire it */}
+        {keys.resend?.connected && (
+          <div className="mt-5 p-3 text-xs border-l-2 text-zinc-300" style={{ borderColor: "var(--nx-orange)", background: "rgba(255,107,53,0.03)" }} data-testid="resend-webhook-hint">
+            <strong className="text-zinc-100">Real buyer replies (optional):</strong> add this inbound webhook to your Resend dashboard so replies route back into Nexus.
+            <div className="mt-2 font-mono text-[10px] text-zinc-400 break-all">
+              {window.location.origin.replace("https://nexus-beta-onboard.emergent.host", "https://nexus-beta-onboard.preview.emergentagent.com")}/api/webhook/resend-inbound
+            </div>
+          </div>
+        )}
+
+        {keysMsg && (
+          <div className="text-xs mt-4" style={{ color: keysMsg.toLowerCase().includes("fail") || keysMsg.toLowerCase().includes("error") ? "var(--nx-danger)" : "var(--nx-cyan)" }} data-testid="byok-msg">
+            {keysMsg}
           </div>
         )}
       </div>

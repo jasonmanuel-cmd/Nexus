@@ -17,10 +17,14 @@ def _now_iso() -> str:
 
 
 async def send_email(db, *, to: str, subject: str, body: str, user_id: Optional[str] = None,
-                    kind: str = "outreach", meta: Optional[dict] = None) -> dict:
-    """Send via Resend if RESEND_API_KEY is configured; otherwise MOCKED to db.email_outbox."""
-    resend_key = os.environ.get("RESEND_API_KEY")
-    from_email = os.environ.get("RESEND_FROM_EMAIL", "nexus@example.com")
+                    kind: str = "outreach", meta: Optional[dict] = None,
+                    api_key_override: Optional[str] = None,
+                    from_email_override: Optional[str] = None) -> dict:
+    """Send via Resend. Per-user `api_key_override` + `from_email_override` take priority.
+    Falls back to env. If neither present, send is MOCKED to db.email_outbox.
+    """
+    resend_key = api_key_override or os.environ.get("RESEND_API_KEY")
+    from_email = from_email_override or os.environ.get("RESEND_FROM_EMAIL", "nexus@example.com")
     mocked = not bool(resend_key)
 
     doc = {

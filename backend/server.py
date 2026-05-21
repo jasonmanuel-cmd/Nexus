@@ -483,9 +483,49 @@ async def promote_target(target_id: str, user: User = Depends(get_current_user))
         f"— Nexus AI on behalf of {user.name or user.email}"
     )
 
-    # Use real email if user has provided one, else use a heuristic guess (fallback)
+    # Use real email if user has provided one. Else try Hunter.io if user has key.
     real_email = (target.get("decision_maker_email") or "").strip()
+    hunter_score: Optional[int] = None
+    if not real_email:
+        try:
+            from routers.integrations_keys import get_user_key
+            hunter_key = await get_user_key(user.user_id, "hunter")
+            if hunter_key:
+                from integrations.hunter_client import find_decision_maker_email as _hunter_find
+                dm_parts = (target.get("decision_maker_name") or "").split(" ", 1)
+                dm_first_h = dm_parts[0] if dm_parts else ""
+                dm_last_h = dm_parts[1] if len(dm_parts) > 1 else ""
+                if dm_first_h and dm_last_h:
+                    found = await _hunter_find(
+                        hunter_key,
+                        company_name=target.get("company_name", ""),
+                        first_name=dm_first_h,
+                        last_name=dm_last_h,
+                    )
+                    if found.get("email"):
+                        real_email = found["email"]
+                        hunter_score = found.get("score")
+                        # Persist back on the target for next time
+                        await db.targets.update_one(
+                            {"id": target_id, "user_id": user.user_id},
+                            {"$set": {"decision_maker_email": real_email,
+                                      "decision_maker_email_source": "hunter",
+                                      "decision_maker_email_score": hunter_score}},
+                        )
+        except Exception as e:
+            logging.warning(f"Hunter auto-find failed (continuing): {e}")
+
     to_address = real_email or f"{dm_first.lower()}@{target.get('company_name', 'example').lower().replace(' ', '')}.com"
+
+    # Pull per-user Resend key (if BYOK)
+    resend_key_override: Optional[str] = None
+    resend_from_override: Optional[str] = None
+    try:
+        keys_doc = await db.user_integration_keys.find_one({"user_id": user.user_id}, {"_id": 0}) or {}
+        resend_key_override = keys_doc.get("resend_api_key") or None
+        resend_from_override = keys_doc.get("resend_from_email") or None
+    except Exception:
+        pass
 
     # Try Gmail first if connected
     gmail_sent = False
@@ -506,7 +546,8 @@ async def promote_target(target_id: str, user: User = Depends(get_current_user))
                     "subject": intro_subject,
                     "body": intro_body,
                     "kind": "promote.intro",
-                    "meta": {"target_id": target_id, "deal_id": deal.id, "decision_maker": dm_name},
+                    "meta": {"target_id": target_id, "deal_id": deal.id, "decision_maker": dm_name,
+                             "hunter_score": hunter_score},
                     "status": "delivered",
                     "mocked": False,
                     "provider": "gmail",
@@ -527,7 +568,10 @@ async def promote_target(target_id: str, user: User = Depends(get_current_user))
             body=intro_body,
             user_id=user.user_id,
             kind="promote.intro",
-            meta={"target_id": target_id, "deal_id": deal.id, "decision_maker": dm_name},
+            meta={"target_id": target_id, "deal_id": deal.id, "decision_maker": dm_name,
+                  "hunter_score": hunter_score},
+            api_key_override=resend_key_override,
+            from_email_override=resend_from_override,
         )
 
     await send_slack(
@@ -538,7 +582,7 @@ async def promote_target(target_id: str, user: User = Depends(get_current_user))
         meta={"target_id": target_id, "deal_id": deal.id},
     )
 
-    return {"deal": deal.model_dump(), "already_promoted": False, "sent_via": "gmail" if gmail_sent else "resend", "sent_to": to_address}
+    return {"deal": deal.model_dump(), "already_promoted": False, "sent_via": "gmail" if gmail_sent else "resend", "sent_to": to_address, "hunter_score": hunter_score}
 
 
 class TargetUpdate(BaseModel):
@@ -1132,12 +1176,16 @@ from routers.payments import router as payments_router
 from routers.gmail import router as gmail_router, public_router as gmail_public_router
 from routers.landing import router as landing_router
 from routers.billing import router as billing_router
+from routers.integrations_keys import router as integrations_keys_router
+from routers.webhooks import router as webhooks_router
 app.include_router(settings_router)
 app.include_router(payments_router)
 app.include_router(gmail_router, prefix="/api")
 app.include_router(gmail_public_router, prefix="/api")
 app.include_router(landing_router, prefix="/api")
 app.include_router(billing_router)
+app.include_router(integrations_keys_router, prefix="/api")
+app.include_router(webhooks_router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,
