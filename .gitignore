@@ -1,4 +1,13 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+.env
+.env.*
+*.env
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+yarn-error.log# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # IDE and editors
 .idea/
@@ -87,3 +96,4 @@ frontend/node_modules/.cache/default-development/2.pack
 frontend/node_modules/.cache/default-development/10.pack
 frontend/node_modules/.cache/default-development/3.pack
 frontend/node_modules/.cache/default-development/11.pack
+frontend/node_modules/.cache/default-development/12.pack

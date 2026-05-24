@@ -32,24 +32,25 @@ GMAIL_SCOPES = [
 ]
 
 
-def _client_config() -> dict:
+def _client_config(redirect_uri: Optional[str] = None) -> dict:
     return {
         "web": {
             "client_id": os.environ["GOOGLE_CLIENT_ID"],
             "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [os.environ["GMAIL_REDIRECT_URI"]],
+            "redirect_uris": [redirect_uri or os.environ.get("GMAIL_REDIRECT_URI", "")],
         }
     }
 
 
-def build_consent_url(state: str) -> str:
-    """Return Google consent URL for Gmail scopes."""
+def build_consent_url(state: str, redirect_uri: Optional[str] = None) -> str:
+    """Return Google consent URL for Gmail scopes. `redirect_uri` overrides env."""
+    final_redirect = redirect_uri or os.environ["GMAIL_REDIRECT_URI"]
     flow = Flow.from_client_config(
-        _client_config(),
+        _client_config(final_redirect),
         scopes=GMAIL_SCOPES,
-        redirect_uri=os.environ["GMAIL_REDIRECT_URI"],
+        redirect_uri=final_redirect,
     )
     url, _ = flow.authorization_url(
         access_type="offline",
@@ -60,12 +61,13 @@ def build_consent_url(state: str) -> str:
     return url
 
 
-def exchange_code_for_tokens(code: str) -> dict:
+def exchange_code_for_tokens(code: str, redirect_uri: Optional[str] = None) -> dict:
     """Exchange OAuth code → credentials dict for Mongo storage."""
+    final_redirect = redirect_uri or os.environ["GMAIL_REDIRECT_URI"]
     flow = Flow.from_client_config(
-        _client_config(),
+        _client_config(final_redirect),
         scopes=GMAIL_SCOPES,
-        redirect_uri=os.environ["GMAIL_REDIRECT_URI"],
+        redirect_uri=final_redirect,
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # scope-order warning is benign

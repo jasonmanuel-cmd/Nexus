@@ -114,31 +114,50 @@ async def build_draft_from_reply(
     return draft
 
 
+def _redirect_uri_from(request: Request) -> str:
+    """Derive the Gmail OAuth redirect URI from the inbound request host.
+
+    Works automatically on both preview (preview.emergentagent.com) and production
+    (emergent.host) so we don't have to maintain per-env config. Honors
+    X-Forwarded-Proto if behind a proxy (Emergent's Kubernetes ingress sets this).
+    """
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "https"
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}/api/integrations/gmail/callback"
+
+
 # ----- OAuth flow -----
 @router.post("/connect")
-async def connect(user: User = Depends(get_current_user)):
-    """Generate Google consent URL. Stores state for callback verification."""
+async def connect(request: Request, user: User = Depends(get_current_user)):
+    """Generate Google consent URL. Stores state for callback verification.
+
+    Uses dynamic redirect URI so the same code works on preview + production.
+    Both URIs must be registered in Google Cloud Console under "Authorized redirect URIs".
+    """
     state = uuid.uuid4().hex
+    redirect_uri = _redirect_uri_from(request)
     await db.gmail_oauth_states.insert_one({
         "state": state,
         "user_id": user.user_id,
+        "redirect_uri": redirect_uri,
         "created_at": now_iso(),
     })
-    url = build_consent_url(state)
-    return {"url": url, "state": state}
+    url = build_consent_url(state, redirect_uri)
+    return {"url": url, "state": state, "redirect_uri": redirect_uri}
 
 
 @public_router.get("/integrations/gmail/callback")
-async def callback(code: str = Query(...), state: str = Query(...)):
+async def callback(request: Request, code: str = Query(...), state: str = Query(...)):
     """Receive OAuth code → exchange → persist credentials → redirect to /app/settings."""
     rec = await db.gmail_oauth_states.find_one({"state": state})
     if not rec:
         raise HTTPException(400, "Invalid or expired OAuth state")
     user_id = rec["user_id"]
+    redirect_uri = rec.get("redirect_uri") or _redirect_uri_from(request)
     await db.gmail_oauth_states.delete_one({"state": state})
 
     try:
-        tokens = exchange_code_for_tokens(code)
+        tokens = exchange_code_for_tokens(code, redirect_uri)
     except Exception as e:
         logging.error(f"Gmail token exchange failed: {e}")
         raise HTTPException(502, f"Token exchange failed: {e}")
